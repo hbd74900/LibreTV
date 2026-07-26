@@ -274,7 +274,8 @@ export async function onRequest(context) {
             const content = isBinary
                 ? await response.arrayBuffer()
                 : await response.text();
-            logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.length}`);
+            const contentLength = typeof content === 'string' ? content.length : content.byteLength;
+            logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${contentLength}`);
             return { content, contentType, responseHeaders: response.headers, isBinary }; // 同时返回原始响应头
 
         } catch (error) {
@@ -295,21 +296,29 @@ export async function onRequest(context) {
     }
 
     // 判断是否是媒体文件 (根据扩展名和 Content-Type) - 这部分在此代理中似乎未使用，但保留
-    function isMediaFile(url, contentType) {
-        if (contentType) {
-            for (const mediaType of MEDIA_CONTENT_TYPES) {
-                if (contentType.toLowerCase().startsWith(mediaType)) {
-                    return true;
-                }
-            }
+    function isMediaFile(url, contentType = '') {
+        const normalizedType = contentType.split(';', 1)[0].trim().toLowerCase();
+
+        // Some providers incorrectly label playlists as video/*; keep M3U8
+        // responses as text so their URLs can still be rewritten.
+        if (normalizedType.includes('mpegurl') || normalizedType.includes('m3u8')) {
+            return false;
         }
-        const urlLower = url.toLowerCase();
-        for (const ext of MEDIA_FILE_EXTENSIONS) {
-            if (urlLower.endsWith(ext) || urlLower.includes(`${ext}?`)) {
-                return true;
-            }
+        if (MEDIA_CONTENT_TYPES.some(mediaType => normalizedType.startsWith(mediaType))) {
+            return true;
         }
-        return false;
+
+        // Query strings and fragments are not part of a file extension.
+        // URL.pathname handles encoded URLs while the fallback covers malformed
+        // target strings that cannot be parsed as absolute URLs.
+        let pathname = url;
+        try {
+            pathname = new URL(url).pathname;
+        } catch {
+            pathname = url.split(/[?#]/, 1)[0];
+        }
+        const pathnameLower = pathname.toLowerCase();
+        return MEDIA_FILE_EXTENSIONS.some(ext => pathnameLower.endsWith(ext));
     }
 
     // 处理 M3U8 中的 #EXT-X-KEY 行 (加密密钥)
@@ -530,7 +539,12 @@ export async function onRequest(context) {
                         return createM3u8Response(processedM3u8);
                     } else {
                         logDebug(`从缓存返回非 M3U8 内容: ${targetUrl}`);
-                        return createResponse(content, 200, new Headers(headers));
+                        const cachedHeaders = new Headers(headers);
+                        cachedHeaders.delete('Content-Length');
+                        cachedHeaders.delete('Content-Encoding');
+                        cachedHeaders.delete('Transfer-Encoding');
+                        cachedHeaders.delete('Content-Disposition');
+                        return createResponse(content, 200, cachedHeaders);
                     }
                 } else {
                      logDebug(`[缓存未命中] 原始内容: ${targetUrl}`);
