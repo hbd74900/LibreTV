@@ -72,7 +72,6 @@ const API_SITES = {
     wujin: {
         api: 'https://api.wujinapi.me/api.php/provide/vod',
         name: '无尽资源'
-    },
     }
 };
 
