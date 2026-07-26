@@ -1,6 +1,13 @@
 // 全局变量
-let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '["tyyszy","dyttzy", "bfzy", "ruyi"]'); // 默认选中资源
+let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '["xiaomaomi","dyttzy", "bfzy", "ruyi"]'); // 默认选中资源
 let customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
+
+// 清理旧版本中已移除的内置资源，避免面板计数与实际选项不一致
+selectedAPIs = selectedAPIs.filter(apiId => API_SITES[apiId] || apiId.startsWith('custom_'));
+if (selectedAPIs.length === 0) {
+    selectedAPIs = ['xiaomaomi', 'dyttzy', 'bfzy', 'ruyi'];
+}
+localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
 
 // 添加当前播放的集数索引
 let currentEpisodeIndex = 0;
@@ -28,7 +35,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // 设置默认API选择（如果是第一次加载）
     if (!localStorage.getItem('hasInitializedDefaults')) {
         // 默认选中资源
-        selectedAPIs = ["tyyszy", "bfzy", "dyttzy", "ruyi"];
+        selectedAPIs = ["xiaomaomi", "bfzy", "dyttzy", "ruyi"];
         localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
 
         // 默认选中过滤开关
