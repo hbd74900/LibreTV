@@ -92,7 +92,17 @@ let adFilteringEnabled = true; // 默认开启广告过滤
 let progressSaveInterval = null; // 定期保存进度的计时器
 let currentVideoUrl = ''; // 记录当前实际的视频URL
 let proxyFallbackAttemptedForUrl = '';
+let playbackGeneration = 0;
+let playbackStartRequest = 0;
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
+
+function escapeMediaAttribute(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
 
 // 页面加载
 document.addEventListener('DOMContentLoaded', function () {
@@ -223,7 +233,7 @@ function initializePageContent() {
 
     // 初始化播放器
     if (videoUrl) {
-        initPlayer(videoUrl);
+        startPlayback(videoUrl);
     } else {
         showError('无效的视频链接');
     }
@@ -283,6 +293,7 @@ function initializePageContent() {
 
 // 处理键盘快捷键
 function handleKeyboardShortcuts(e) {
+    if (document.body.classList.contains('tv-navigation-active')) return;
     // 忽略输入框中的按键事件
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
@@ -546,29 +557,75 @@ function showShortcutHint(text, direction) {
     }, 2000);
 }
 
-async function retryPlaybackThroughProxy(directUrl) {
-    if (!directUrl || proxyFallbackAttemptedForUrl === directUrl) return false;
-    proxyFallbackAttemptedForUrl = directUrl;
-
+function showPlaybackLoading(message) {
+    const errorElement = document.getElementById('error');
+    if (errorElement) errorElement.style.display = 'none';
     const loadingElement = document.getElementById('player-loading');
-    if (loadingElement) {
-        loadingElement.style.display = 'flex';
-        loadingElement.innerHTML = `
-            <div class="loading-spinner"></div>
-            <div>直连失败，正在通过备用线路重试...</div>
-        `;
+    if (!loadingElement) return;
+    loadingElement.style.display = 'flex';
+    loadingElement.innerHTML = `
+        <div class="loading-spinner"></div>
+        <div>${message || '正在连接视频...'}</div>
+    `;
+}
+
+function shouldStartThroughProxy() {
+    const source = new URLSearchParams(window.location.search).get('source') || '';
+    return source === 'ruyi'
+        || !!(window.MediaCompat && window.MediaCompat.shouldPreferProxy());
+}
+
+async function authenticatedProxyUrl(directUrl) {
+    if (window.MediaCompat && typeof window.MediaCompat.buildProxyUrl === 'function') {
+        return window.MediaCompat.buildProxyUrl(directUrl);
+    }
+    const proxyPath = PROXY_URL + encodeURIComponent(directUrl);
+    return window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl
+        ? window.ProxyAuth.addAuthToProxyUrl(proxyPath)
+        : proxyPath;
+}
+
+async function startPlayback(directUrl) {
+    if (!directUrl) return;
+    const requestId = ++playbackStartRequest;
+
+    if (!shouldStartThroughProxy()) {
+        initPlayer(directUrl);
+        return;
     }
 
+    showPlaybackLoading('正在通过兼容线路连接视频...');
     try {
-        const proxyPath = PROXY_URL + encodeURIComponent(directUrl);
-        const proxyUrl = window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl
-            ? await window.ProxyAuth.addAuthToProxyUrl(proxyPath)
-            : proxyPath;
-        if (!proxyUrl.includes('auth=')) throw new Error('代理鉴权信息不可用');
-        setTimeout(() => initPlayer(proxyUrl, { directUrl, isProxy: true }), 0);
+        const proxyUrl = await authenticatedProxyUrl(directUrl);
+        if (requestId !== playbackStartRequest) return;
+        if (!/[?&]auth=/.test(proxyUrl)) throw new Error('代理鉴权信息不可用');
+        proxyFallbackAttemptedForUrl = directUrl;
+        initPlayer(proxyUrl, { directUrl, isProxy: true });
+    } catch (error) {
+        if (requestId === playbackStartRequest) initPlayer(directUrl);
+    }
+}
+
+async function retryPlaybackThroughProxy(directUrl, generation) {
+    if (!directUrl || proxyFallbackAttemptedForUrl === directUrl) return false;
+    if (generation && generation !== playbackGeneration) return false;
+    proxyFallbackAttemptedForUrl = directUrl;
+    showPlaybackLoading('直连失败，正在通过兼容线路重试...');
+
+    try {
+        const proxyUrl = await authenticatedProxyUrl(directUrl);
+        if (generation && generation !== playbackGeneration) return false;
+        if (!/[?&]auth=/.test(proxyUrl)) throw new Error('代理鉴权信息不可用');
+        setTimeout(() => {
+            if (!generation || generation === playbackGeneration) {
+                initPlayer(proxyUrl, { directUrl, isProxy: true });
+            }
+        }, 0);
         return true;
     } catch (error) {
-        showError('当前视频线路无法连接，请返回并切换资源');
+        if (!generation || generation === playbackGeneration) {
+            showError('当前视频线路无法连接，请返回并切换资源');
+        }
         return false;
     }
 }
@@ -582,6 +639,11 @@ function initPlayer(videoUrl, playbackOptions = {}) {
     const directUrl = playbackOptions.directUrl || videoUrl;
     const isProxyPlayback = playbackOptions.isProxy === true;
     if (!isProxyPlayback) proxyFallbackAttemptedForUrl = '';
+    const generation = ++playbackGeneration;
+    let playbackStarted = false;
+    let hlsControlsErrors = false;
+    let terminalPlaybackError = false;
+    let playbackRecoveryInProgress = false;
 
     // 销毁旧实例
     if (art) {
@@ -654,6 +716,7 @@ function initPlayer(videoUrl, playbackOptions = {}) {
         },
         customType: {
             m3u8: function (video, url) {
+                hlsControlsErrors = true;
                 // 清理之前的HLS实例
                 if (currentHls && currentHls.destroy) {
                     try {
@@ -670,20 +733,29 @@ function initPlayer(videoUrl, playbackOptions = {}) {
                 let errorDisplayed = false;
                 // 跟踪是否有错误发生
                 let errorCount = 0;
-                // 跟踪视频是否开始播放
-                let playbackStarted = false;
+                let fatalNetworkErrorCount = 0;
+                let mediaRecoveryCount = 0;
                 // 跟踪视频是否出现bufferAppendError
                 let bufferAppendErrorCount = 0;
 
                 // 监听视频播放事件
                 video.addEventListener('playing', function () {
+                    if (generation !== playbackGeneration) return;
                     playbackStarted = true;
+                    playbackRecoveryInProgress = false;
+                    document.getElementById('player-loading').style.display = 'none';
+                    document.getElementById('error').style.display = 'none';
+                });
+
+                video.addEventListener('canplay', function () {
+                    if (generation !== playbackGeneration || terminalPlaybackError) return;
                     document.getElementById('player-loading').style.display = 'none';
                     document.getElementById('error').style.display = 'none';
                 });
 
                 // 监听视频进度事件
                 video.addEventListener('timeupdate', function () {
+                    if (generation !== playbackGeneration) return;
                     if (video.currentTime > 1) {
                         // 视频进度超过1秒，隐藏错误（如果存在）
                         document.getElementById('error').style.display = 'none';
@@ -693,26 +765,30 @@ function initPlayer(videoUrl, playbackOptions = {}) {
                 hls.loadSource(url);
                 hls.attachMedia(video);
 
-                // enable airplay, from https://github.com/video-dev/hls.js/issues/5989
-                // 检查是否已存在source元素，如果存在则更新，不存在则创建
-                let sourceElement = video.querySelector('source');
-                if (sourceElement) {
-                    // 更新现有source元素的URL
-                    sourceElement.src = videoUrl;
-                } else {
-                    // 创建新的source元素
-                    sourceElement = document.createElement('source');
-                    sourceElement.src = videoUrl;
+                // The extra source is only an AirPlay workaround for Apple native HLS.
+                // On Android TV it starts a duplicate direct request and emits a false media error.
+                const supportsNativeAirPlay = typeof video.webkitShowPlaybackTargetPicker === 'function'
+                    && !!video.canPlayType('application/vnd.apple.mpegurl');
+                if (supportsNativeAirPlay) {
+                    const sourceElement = document.createElement('source');
+                    sourceElement.type = 'application/vnd.apple.mpegurl';
+                    sourceElement.src = directUrl;
                     video.appendChild(sourceElement);
+                } else {
+                    Array.from(video.querySelectorAll('source')).forEach(sourceElement => {
+                        if (sourceElement.parentNode) sourceElement.parentNode.removeChild(sourceElement);
+                    });
                 }
                 video.disableRemotePlayback = false;
 
                 hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                    if (generation !== playbackGeneration) return;
                     video.play().catch(e => {
                     });
                 });
 
                 hls.on(Hls.Events.ERROR, function (event, data) {
+                    if (generation !== playbackGeneration) return;
                     // 增加错误计数
                     errorCount++;
 
@@ -732,25 +808,42 @@ function initPlayer(videoUrl, playbackOptions = {}) {
 
                     // 如果是致命错误，且视频未播放
                     if (data.fatal && !playbackStarted) {
+                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) fatalNetworkErrorCount++;
+                        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) mediaRecoveryCount++;
                         // 尝试恢复错误
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
                                 if (!isProxyPlayback && proxyFallbackAttemptedForUrl !== directUrl) {
-                                    retryPlaybackThroughProxy(directUrl);
-                                } else if (errorCount <= 3) {
+                                    playbackRecoveryInProgress = true;
+                                    hls.stopLoad();
+                                    retryPlaybackThroughProxy(directUrl, generation);
+                                } else if (fatalNetworkErrorCount <= 2) {
+                                    playbackRecoveryInProgress = true;
                                     hls.startLoad();
                                 } else if (!errorDisplayed) {
                                     errorDisplayed = true;
+                                    terminalPlaybackError = true;
                                     showError('当前视频线路无法连接，请返回并切换资源');
                                 }
                                 break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
-                                hls.recoverMediaError();
+                                if (mediaRecoveryCount <= 2) {
+                                    playbackRecoveryInProgress = true;
+                                    if (mediaRecoveryCount === 2 && typeof hls.swapAudioCodec === 'function') {
+                                        hls.swapAudioCodec();
+                                    }
+                                    hls.recoverMediaError();
+                                } else if (!errorDisplayed) {
+                                    errorDisplayed = true;
+                                    terminalPlaybackError = true;
+                                    showError('当前设备无法解码这条视频线路，请切换资源');
+                                }
                                 break;
                             default:
                                 // 仅在多次恢复尝试后显示错误
                                 if (errorCount > 3 && !errorDisplayed) {
                                     errorDisplayed = true;
+                                    terminalPlaybackError = true;
                                     showError('视频加载失败，可能是格式不兼容或源不可用');
                                 }
                                 break;
@@ -758,15 +851,6 @@ function initPlayer(videoUrl, playbackOptions = {}) {
                     }
                 });
 
-                // 监听分段加载事件
-                hls.on(Hls.Events.FRAG_LOADED, function () {
-                    document.getElementById('player-loading').style.display = 'none';
-                });
-
-                // 监听级别加载事件
-                hls.on(Hls.Events.LEVEL_LOADED, function () {
-                    document.getElementById('player-loading').style.display = 'none';
-                });
             }
         }
     });
@@ -847,7 +931,7 @@ function initPlayer(videoUrl, playbackOptions = {}) {
     });
 
     art.on('video:loadedmetadata', function() {
-        document.getElementById('player-loading').style.display = 'none';
+        if (generation !== playbackGeneration) return;
         videoHasEnded = false; // 视频加载时重置结束标志
         // 优先使用URL传递的position参数
         const urlParams = new URLSearchParams(window.location.search);
@@ -890,8 +974,21 @@ function initPlayer(videoUrl, playbackOptions = {}) {
 
     // 错误处理
     art.on('video:error', function (error) {
+        if (generation !== playbackGeneration) return;
         // 如果正在切换视频，忽略错误
         if (window.isSwitchingVideo) {
+            return;
+        }
+
+        // HLS.js owns retries and proxy failover. Native video:error is a DOM
+        // event, not a terminal Error, and old Android TV engines emit it while
+        // the replacement stream is still connecting.
+        if (hlsControlsErrors) {
+            if (!terminalPlaybackError) {
+                showPlaybackLoading(playbackRecoveryInProgress
+                    ? '正在切换兼容线路...'
+                    : '正在连接视频...');
+            }
             return;
         }
 
@@ -901,7 +998,17 @@ function initPlayer(videoUrl, playbackOptions = {}) {
             if (el) el.style.display = 'none';
         });
 
-        showError('视频播放失败: ' + (error.message || '未知错误'));
+        const mediaError = art && art.video ? art.video.error : null;
+        const mediaErrorMessages = {
+            1: '播放已中止',
+            2: '网络连接失败',
+            3: '视频解码失败',
+            4: '视频格式不受支持'
+        };
+        const message = mediaErrorMessages[mediaError && mediaError.code]
+            || (error && error.message)
+            || '播放器无法加载该视频';
+        showError('视频播放失败: ' + message);
     });
 
     // 添加移动端长按三倍速播放功能
@@ -939,6 +1046,7 @@ function initPlayer(videoUrl, playbackOptions = {}) {
 
     // 10秒后如果仍在加载，但不立即显示错误
     setTimeout(function () {
+        if (generation !== playbackGeneration) return;
         // 如果视频已经播放开始，则不显示错误
         if (art && art.video && art.video.currentTime > 0) {
             return;
@@ -981,22 +1089,9 @@ class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
 
 // 过滤可疑的广告内容
 function filterAdsFromM3U8(m3u8Content, strictMode = false) {
-    if (!m3u8Content) return '';
-
-    // 按行分割M3U8内容
-    const lines = m3u8Content.split('\n');
-    const filteredLines = [];
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-
-        // 只过滤#EXT-X-DISCONTINUITY标识
-        if (!line.includes('#EXT-X-DISCONTINUITY')) {
-            filteredLines.push(line);
-        }
-    }
-
-    return filteredLines.join('\n');
+    // EXT-X-DISCONTINUITY is required for timestamp and codec transitions.
+    // Removing it corrupts valid streams and does not remove the ad segments.
+    return m3u8Content || '';
 }
 
 
@@ -1130,7 +1225,7 @@ function playEpisode(index) {
     currentUrl.searchParams.delete('position');
     window.history.replaceState({}, '', currentUrl.toString());
 
-    initPlayer(url);
+    startPlayback(url);
 
     // 更新UI
     updateEpisodeInfo();
@@ -1860,7 +1955,7 @@ async function showSwitchResourceModal() {
 
     // 渲染资源列表
     let html = '<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 p-4">';
-    
+
     for (const [sourceKey, result] of sortedResults) {
         if (!result) continue;
         
@@ -1868,16 +1963,20 @@ async function showSwitchResourceModal() {
         const isCurrentSource = String(sourceKey) === String(currentSourceCode) && String(result.vod_id) === String(currentVideoId);
         const sourceName = resourceOptions.find(opt => opt.key === sourceKey)?.name || '未知资源';
         const speedResult = speedResults[sourceKey] || { speed: -1, error: '未测试' };
+        const coverUrl = /^https?:\/\//i.test(result.vod_pic || '')
+            ? escapeMediaAttribute(result.vod_pic)
+            : '';
         
         html += `
             <div class="relative group ${isCurrentSource ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:scale-105 transition-transform'}"
                  ${!isCurrentSource ? 'role="button" tabindex="0" data-tv-focusable' : 'aria-current="true"'}
                  ${!isCurrentSource ? `onclick="switchToResource('${sourceKey}', '${result.vod_id}')"` : ''}>
                 <div class="aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 relative">
-                    <img src="${result.vod_pic}" 
+                    <img src="image/nomedia.png"
+                         ${coverUrl ? `data-media-src="${coverUrl}" onerror="window.MediaCompat ? window.MediaCompat.handleImageError(this) : (this.onerror=null, this.src='image/nomedia.png')"` : ''}
                          alt="${result.vod_name}"
                          class="w-full h-full object-cover"
-                         onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNjY2IiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHJlY3QgeD0iMyIgeT0iMyIgd2lkdGg9IjE4IiBoZWlnaHQ9IjE4IiByeD0iMiIgcnk9IjIiPjwvcmVjdD48cGF0aCBkPSJNMjEgMTV2NGEyIDIgMCAwIDEtMiAySDVhMiAyIDAgMCAxLTItMnYtNCI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE3IDggMTIgMyA3IDgiPjwvcG9seWxpbmU+PHBhdGggZD0iTTEyIDN2MTIiPjwvcGF0aD48L3N2Zz4='">
+                         referrerpolicy="no-referrer">
                     
                     <!-- 速率显示在图片右上角 -->
                     <div class="absolute top-1 right-1 speed-badge bg-black bg-opacity-75">
@@ -1904,6 +2003,7 @@ async function showSwitchResourceModal() {
     
     html += '</div>';
     modalContent.innerHTML = html;
+    if (window.MediaCompat) window.MediaCompat.loadImages(modalContent);
 }
 
 // 切换资源的函数

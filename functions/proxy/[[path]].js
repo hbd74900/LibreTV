@@ -13,6 +13,7 @@
 // --- 常量 (之前在 config.js 中，现在移到这里，因为它们与代理逻辑相关) ---
 const MEDIA_FILE_EXTENSIONS = [
     '.mp4', '.webm', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.f4v', '.m4v', '.3gp', '.3g2', '.ts', '.mts', '.m2ts',
+    '.m4s', '.cmfv', '.cmfa', '.mp4a', '.key',
     '.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma', '.alac', '.aiff', '.opus',
     '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.svg', '.avif', '.heic'
 ];
@@ -176,7 +177,21 @@ export async function onRequest(context) {
     function createM3u8Response(content) {
         return createResponse(content, 200, {
             "Content-Type": "application/vnd.apple.mpegurl", // M3U8 的标准 MIME 类型
-            "Cache-Control": `public, max-age=${CACHE_TTL}` // 允许浏览器和CDN缓存
+            // Playlists commonly contain expiring signatures or live windows.
+            "Cache-Control": "no-store"
+        });
+    }
+
+    function createUpstreamResponse(response) {
+        const headers = new Headers(response.headers);
+        headers.delete('Content-Disposition');
+        headers.set('Access-Control-Allow-Origin', '*');
+        headers.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
+        headers.set('Access-Control-Allow-Headers', '*');
+        return new Response(request.method === 'HEAD' ? null : response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers
         });
     }
 
@@ -236,22 +251,37 @@ export async function onRequest(context) {
         return authHash ? `${proxyPath}?auth=${encodeURIComponent(authHash)}` : proxyPath;
     }
 
+    function isM3u8Url(targetUrl) {
+        try {
+            return new URL(targetUrl).pathname.toLowerCase().endsWith('.m3u8');
+        } catch (error) {
+            return /\.m3u8(?:[?#]|$)/i.test(targetUrl || '');
+        }
+    }
+
     // 获取远程内容及其类型
     async function fetchContentWithType(targetUrl) {
         const headers = new Headers({
             'User-Agent': getRandomUserAgent(),
             'Accept': '*/*',
-            // 尝试传递一些原始请求的头信息
             'Accept-Language': request.headers.get('Accept-Language') || 'zh-CN,zh;q=0.9,en;q=0.8',
-            // 尝试设置 Referer 为目标网站的域名，或者传递原始 Referer
-            'Referer': request.headers.get('Referer') || new URL(targetUrl).origin
+            // Sending the LibreTV page as Referer triggers anti-hotlink rules.
+            'Referer': `${new URL(targetUrl).origin}/`
         });
+        const range = request.headers.get('Range');
+        const ifRange = request.headers.get('If-Range');
+        if (range) headers.set('Range', range);
+        if (ifRange) headers.set('If-Range', ifRange);
 
         try {
             // 直接请求目标 URL
             logDebug(`开始直接请求: ${targetUrl}`);
             // Cloudflare Functions 的 fetch 默认支持重定向
-            const response = await fetch(targetUrl, { headers, redirect: 'follow' });
+            const response = await fetch(targetUrl, {
+                headers,
+                redirect: 'follow',
+                method: request.method === 'HEAD' ? 'HEAD' : 'GET'
+            });
 
             if (!response.ok) {
                  const errorBody = await response.text().catch(() => '');
@@ -259,14 +289,23 @@ export async function onRequest(context) {
                  throw new Error(`HTTP error ${response.status}: ${response.statusText}. URL: ${targetUrl}. Body: ${errorBody.substring(0, 150)}`);
             }
 
+            const finalUrl = response.url || targetUrl;
             const contentType = response.headers.get('Content-Type') || '';
-            const isBinary = isMediaFile(targetUrl, contentType);
-            const content = isBinary
-                ? await response.arrayBuffer()
-                : await response.text();
-            const contentLength = typeof content === 'string' ? content.length : content.byteLength;
-            logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${contentLength}`);
-            return { content, contentType, responseHeaders: response.headers, isBinary }; // 同时返回原始响应头
+            const isPlaylist = isM3u8Url(targetUrl)
+                || isM3u8Url(finalUrl)
+                || /(?:mpegurl|m3u8)/i.test(contentType);
+            const content = isPlaylist && request.method !== 'HEAD'
+                ? await response.text()
+                : null;
+            logDebug(`请求成功: ${targetUrl}, 最终URL: ${finalUrl}, Content-Type: ${contentType}`);
+            return {
+                content,
+                contentType,
+                response,
+                responseHeaders: response.headers,
+                finalUrl,
+                isPlaylist
+            };
 
         } catch (error) {
              logDebug(`请求彻底失败: ${targetUrl}: ${error.message}`);
@@ -352,6 +391,12 @@ export async function onRequest(context) {
                 output.push(processMapLine(line, baseUrl));
                  continue;
             }
+            if (line.startsWith('#') && line.includes('URI="')) {
+                output.push(line.replace(/URI="([^"]+)"/g, (match, uri) => {
+                    return `URI="${rewriteUrlToProxy(resolveUrl(baseUrl, uri))}"`;
+                }));
+                continue;
+            }
              if (line.startsWith('#EXTINF')) {
                  output.push(line);
                  continue;
@@ -385,107 +430,21 @@ export async function onRequest(context) {
         }
 
         const baseUrl = getBaseUrl(url);
-        const lines = content.split('\n');
-        let highestBandwidth = -1;
-        let bestVariantUrl = '';
+        const rewriteMasterUri = (uri) => {
+            if (!uri || /^(?:data|skd):/i.test(uri)) return uri;
+            return rewriteUrlToProxy(resolveUrl(baseUrl, uri));
+        };
 
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
-                const bandwidthMatch = lines[i].match(/BANDWIDTH=(\d+)/);
-                const currentBandwidth = bandwidthMatch ? parseInt(bandwidthMatch[1], 10) : 0;
-
-                 let variantUriLine = '';
-                 for (let j = i + 1; j < lines.length; j++) {
-                     const line = lines[j].trim();
-                     if (line && !line.startsWith('#')) {
-                         variantUriLine = line;
-                         i = j;
-                         break;
-                     }
-                 }
-
-                 if (variantUriLine && currentBandwidth >= highestBandwidth) {
-                     highestBandwidth = currentBandwidth;
-                     bestVariantUrl = resolveUrl(baseUrl, variantUriLine);
-                 }
-            }
-        }
-
-         if (!bestVariantUrl) {
-             logDebug(`主列表中未找到 BANDWIDTH 或 STREAM-INF，尝试查找第一个子列表引用: ${url}`);
-             for (let i = 0; i < lines.length; i++) {
-                 const line = lines[i].trim();
-                 if (line && !line.startsWith('#') && (line.endsWith('.m3u8') || line.includes('.m3u8?'))) { // 修复：检查是否包含 .m3u8?
-                    bestVariantUrl = resolveUrl(baseUrl, line);
-                     logDebug(`备选方案：找到第一个子列表引用: ${bestVariantUrl}`);
-                     break;
-                 }
-             }
-         }
-
-        if (!bestVariantUrl) {
-            logDebug(`在主列表 ${url} 中未找到任何有效的子播放列表 URL。可能格式有问题或仅包含音频/字幕。将尝试按媒体列表处理原始内容。`);
-            return processMediaPlaylist(url, content);
-        }
-
-        // --- 获取并处理选中的子 M3U8 ---
-
-        const cacheKey = `m3u8_processed:${bestVariantUrl}`; // 使用处理后的缓存键
-
-        let kvNamespace = null;
-        try {
-            kvNamespace = env.LIBRETV_PROXY_KV; // 从环境获取 KV 命名空间 (变量名在 Cloudflare 设置)
-            if (!kvNamespace) throw new Error("KV 命名空间未绑定");
-        } catch (e) {
-            logDebug(`KV 命名空间 'LIBRETV_PROXY_KV' 访问出错或未绑定: ${e.message}`);
-            kvNamespace = null; // 确保设为 null
-        }
-
-        if (kvNamespace) {
-            try {
-                const cachedContent = await kvNamespace.get(cacheKey);
-                if (cachedContent) {
-                    logDebug(`[缓存命中] 主列表的子列表: ${bestVariantUrl}`);
-                    return cachedContent;
-                } else {
-                    logDebug(`[缓存未命中] 主列表的子列表: ${bestVariantUrl}`);
-                }
-            } catch (kvError) {
-                logDebug(`从 KV 读取缓存失败 (${cacheKey}): ${kvError.message}`);
-                // 出错则继续执行，不影响功能
-            }
-        }
-
-        logDebug(`选择的子列表 (带宽: ${highestBandwidth}): ${bestVariantUrl}`);
-        const { content: variantContent, contentType: variantContentType } = await fetchContentWithType(bestVariantUrl);
-
-        if (!isM3u8Content(variantContent, variantContentType)) {
-            logDebug(`获取到的子列表 ${bestVariantUrl} 不是 M3U8 内容 (类型: ${variantContentType})。可能直接是媒体文件，返回原始内容。`);
-             // 如果不是M3U8，但看起来像媒体内容，直接返回代理后的内容
-             // 注意：这里可能需要决定是否直接代理这个非 M3U8 的 URL
-             // 为了简化，我们假设如果不是 M3U8，则流程中断或按原样处理
-             // 或者，尝试将其作为媒体列表处理？（当前行为）
-             // return createResponse(variantContent, 200, { 'Content-Type': variantContentType || 'application/octet-stream' });
-             // 尝试按媒体列表处理，以防万一
-             return processMediaPlaylist(bestVariantUrl, variantContent);
-
-        }
-
-        const processedVariant = await processM3u8Content(bestVariantUrl, variantContent, recursionDepth + 1, env);
-
-        if (kvNamespace) {
-             try {
-                 // 使用 waitUntil 异步写入缓存，不阻塞响应返回
-                 // 注意 KV 的写入限制 (免费版每天 1000 次)
-                 waitUntil(kvNamespace.put(cacheKey, processedVariant, { expirationTtl: CACHE_TTL }));
-                 logDebug(`已将处理后的子列表写入缓存: ${bestVariantUrl}`);
-             } catch (kvError) {
-                 logDebug(`向 KV 写入缓存失败 (${cacheKey}): ${kvError.message}`);
-                 // 写入失败不影响返回结果
-             }
-        }
-
-        return processedVariant;
+        // Preserve every rendition so HLS.js can start at a TV-friendly
+        // bitrate and adapt upward instead of forcing the highest variant.
+        return content.split('\n').map((originalLine) => {
+            const line = originalLine.trim();
+            if (!line) return originalLine;
+            if (!line.startsWith('#')) return rewriteMasterUri(line);
+            return originalLine.replace(/URI="([^"]+)"/g, (match, uri) => {
+                return `URI="${rewriteMasterUri(uri)}"`;
+            });
+        }).join('\n');
     }
 
     // --- 主要请求处理逻辑 ---
@@ -502,7 +461,9 @@ export async function onRequest(context) {
 
         // --- 缓存检查 (KV) ---
         const cacheKey = `proxy_raw_v2:${targetUrl}`; // 使用原始内容的缓存键
-        const canUseTextCache = !isMediaFile(targetUrl, '');
+        // Remote APIs and playlists frequently carry short-lived URLs. Keep
+        // the existing KV binding available, but bypass stale raw responses.
+        const canUseTextCache = false;
         let kvNamespace = null;
         try {
             kvNamespace = env.LIBRETV_PROXY_KV;
@@ -546,10 +507,17 @@ export async function onRequest(context) {
         }
 
         // --- 实际请求 ---
-        const { content, contentType, responseHeaders, isBinary } = await fetchContentWithType(targetUrl);
+        const {
+            content,
+            contentType,
+            response,
+            responseHeaders,
+            finalUrl,
+            isPlaylist
+        } = await fetchContentWithType(targetUrl);
 
         // --- 写入缓存 (KV) ---
-        if (kvNamespace && !isBinary) {
+        if (kvNamespace && canUseTextCache && content !== null) {
              try {
                  const headersToCache = {};
                  responseHeaders.forEach((value, key) => { headersToCache[key.toLowerCase()] = value; });
@@ -564,24 +532,21 @@ export async function onRequest(context) {
         }
 
         // --- 处理响应 ---
-        if (isM3u8Content(content, contentType)) {
-            logDebug(`内容是 M3U8，开始处理: ${targetUrl}`);
-            const processedM3u8 = await processM3u8Content(targetUrl, content, 0, env);
+        if (request.method !== 'HEAD' && isPlaylist && isM3u8Content(content, contentType)) {
+            logDebug(`内容是 M3U8，开始处理: ${finalUrl}`);
+            const processedM3u8 = await processM3u8Content(finalUrl, content, 0, env);
             return createM3u8Response(processedM3u8);
-        } else {
-            logDebug(`内容不是 M3U8 (类型: ${contentType})，直接返回: ${targetUrl}`);
-            const finalHeaders = new Headers(responseHeaders);
-            finalHeaders.delete('Content-Length');
-            finalHeaders.delete('Content-Encoding');
-            finalHeaders.delete('Transfer-Encoding');
-            finalHeaders.delete('Content-Disposition');
-            finalHeaders.set('Cache-Control', `public, max-age=${CACHE_TTL}`);
-            // 添加 CORS 头，确保非 M3U8 内容也能跨域访问（例如图片、字幕文件等）
-            finalHeaders.set("Access-Control-Allow-Origin", "*");
-            finalHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
-            finalHeaders.set("Access-Control-Allow-Headers", "*");
-            return createResponse(content, 200, finalHeaders);
         }
+
+        if (content !== null) {
+            const textHeaders = new Headers(responseHeaders);
+            textHeaders.delete('Content-Length');
+            textHeaders.delete('Content-Encoding');
+            return createResponse(content, response.status, textHeaders);
+        }
+
+        logDebug(`内容不是 M3U8 (类型: ${contentType})，按原始字节流返回: ${finalUrl}`);
+        return createUpstreamResponse(response);
 
     } catch (error) {
         logDebug(`处理代理请求时发生严重错误: ${error.message} \n ${error.stack}`);
