@@ -91,7 +91,7 @@ let shortcutHintTimeout = null; // 用于控制快捷键提示显示时间
 let adFilteringEnabled = true; // 默认开启广告过滤
 let progressSaveInterval = null; // 定期保存进度的计时器
 let currentVideoUrl = ''; // 记录当前实际的视频URL
-const isWebkit = (typeof window.webkitConvertPointFromNodeToPage === 'function')
+let proxyFallbackAttemptedForUrl = '';
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
 // 页面加载
@@ -538,11 +538,42 @@ function showShortcutHint(text, direction) {
     }, 2000);
 }
 
+async function retryPlaybackThroughProxy(directUrl) {
+    if (!directUrl || proxyFallbackAttemptedForUrl === directUrl) return false;
+    proxyFallbackAttemptedForUrl = directUrl;
+
+    const loadingElement = document.getElementById('player-loading');
+    if (loadingElement) {
+        loadingElement.style.display = 'flex';
+        loadingElement.innerHTML = `
+            <div class="loading-spinner"></div>
+            <div>直连失败，正在通过备用线路重试...</div>
+        `;
+    }
+
+    try {
+        const proxyPath = PROXY_URL + encodeURIComponent(directUrl);
+        const proxyUrl = window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl
+            ? await window.ProxyAuth.addAuthToProxyUrl(proxyPath)
+            : proxyPath;
+        if (!proxyUrl.includes('auth=')) throw new Error('代理鉴权信息不可用');
+        setTimeout(() => initPlayer(proxyUrl, { directUrl, isProxy: true }), 0);
+        return true;
+    } catch (error) {
+        showError('当前视频线路无法连接，请返回并切换资源');
+        return false;
+    }
+}
+
 // 初始化播放器
-function initPlayer(videoUrl) {
+function initPlayer(videoUrl, playbackOptions = {}) {
     if (!videoUrl) {
         return
     }
+
+    const directUrl = playbackOptions.directUrl || videoUrl;
+    const isProxyPlayback = playbackOptions.isProxy === true;
+    if (!isProxyPlayback) proxyFallbackAttemptedForUrl = '';
 
     // 销毁旧实例
     if (art) {
@@ -696,7 +727,14 @@ function initPlayer(videoUrl) {
                         // 尝试恢复错误
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
-                                hls.startLoad();
+                                if (!isProxyPlayback && proxyFallbackAttemptedForUrl !== directUrl) {
+                                    retryPlaybackThroughProxy(directUrl);
+                                } else if (errorCount <= 3) {
+                                    hls.startLoad();
+                                } else if (!errorDisplayed) {
+                                    errorDisplayed = true;
+                                    showError('当前视频线路无法连接，请返回并切换资源');
+                                }
                                 break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
                                 hls.recoverMediaError();
@@ -1077,11 +1115,7 @@ function playEpisode(index) {
     currentUrl.searchParams.delete('position');
     window.history.replaceState({}, '', currentUrl.toString());
 
-    if (isWebkit) {
-        initPlayer(url);
-    } else {
-        art.switch = url;
-    }
+    initPlayer(url);
 
     // 更新UI
     updateEpisodeInfo();

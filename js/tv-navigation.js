@@ -134,6 +134,20 @@
         return !!(window.LibreTVPlayer && window.LibreTVPlayer.handleRemoteAction(action));
     }
 
+    function shouldKeepHorizontalInputKey(target, direction) {
+        if (!target || (direction !== 'ArrowLeft' && direction !== 'ArrowRight')) return false;
+        if (target.matches('select, input[type="range"]')) return true;
+        if (!target.matches('textarea, input:not([type]), input[type="text"], input[type="search"], input[type="password"], input[type="email"], input[type="url"], input[type="tel"]')) {
+            return false;
+        }
+
+        const start = target.selectionStart;
+        const end = target.selectionEnd;
+        if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
+        if (start !== end) return true;
+        return direction === 'ArrowLeft' ? start > 0 : end < target.value.length;
+    }
+
     function closeElement(element) {
         if (!element) return false;
         const close = element.querySelector('#closeTagModal, #closeBoxModal, [data-tv-close], button[onclick*="closeModal"], .close-btn');
@@ -224,7 +238,9 @@
             event.stopImmediatePropagation();
             return;
         }
-        if (input && (direction === 'ArrowLeft' || direction === 'ArrowRight')) return;
+        // Text editing keeps Left/Right until the caret reaches an edge. A
+        // further press then exits the field, which is essential on remotes.
+        if (input && shouldKeepHorizontalInputKey(target, direction)) return;
 
         if (target && target.matches('[data-tv-player-surface]')) {
             const action = {
