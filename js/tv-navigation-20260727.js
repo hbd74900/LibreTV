@@ -1,3 +1,4 @@
+// Versioned filename prevents stale TV-browser and CDN caches.
 (function () {
     'use strict';
 
