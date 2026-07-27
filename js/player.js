@@ -415,6 +415,14 @@ window.LibreTVPlayer = {
     isPlayerSurface(target) {
         return !!(target && target.closest && target.closest('[data-tv-player-surface]'));
     },
+    isPlayerArea(target) {
+        return !!(target && target.closest && target.closest('#player'));
+    },
+    showControls() {
+        if (!art || !art.controls) return false;
+        art.controls.show = true;
+        return true;
+    },
     isFullscreen() {
         return !!(document.fullscreenElement || (art && (art.fullscreen || art.fullscreenWeb)));
     },
@@ -813,6 +821,13 @@ function initPlayer(videoUrl, playbackOptions = {}) {
                     .catch((error) => {
                     });
             }
+        }
+
+        if (document.body.classList.contains('tv-navigation-active')) {
+            setTimeout(() => {
+                const playerSurface = document.getElementById('player');
+                if (playerSurface) playerSurface.focus({ preventScroll: true });
+            }, 0);
         }
     }
 

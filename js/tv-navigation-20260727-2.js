@@ -31,6 +31,11 @@
         '#showImportBoxModal', '#importUrlModal', '#modal', '#historyPanel.show', '#settingsPanel.show'
     ];
     const nativeFocusable = 'a[href], button, input, select, textarea, [tabindex], [data-tv-focusable]';
+    const artControlSelector = [
+        '.art-control-playAndPause', '.art-control-volume', '.art-control-screenshot',
+        '.art-control-setting', '.art-control-pip', '.art-control-fullscreenWeb',
+        '.art-control-fullscreen', '.art-setting-item'
+    ].join(', ');
     let activeScope = document.body;
     let returnFocus = null;
     let refreshQueued = false;
@@ -58,6 +63,26 @@
 
     function enhance(root) {
         const scope = root && root.querySelectorAll ? root : document;
+        const playerControls = [];
+        if (scope.nodeType === Node.ELEMENT_NODE && scope.matches(artControlSelector)) playerControls.push(scope);
+        playerControls.push(...scope.querySelectorAll(artControlSelector));
+        playerControls.forEach((element, index) => {
+            element.tabIndex = 0;
+            element.setAttribute('role', 'button');
+            element.setAttribute('data-tv-focusable', '');
+            element.setAttribute('data-tv-player-control', '');
+            if (!element.id) element.id = `tv-art-control-${element.className.split(' ')[1] || 'item'}-${index}`;
+            if (!element.hasAttribute('aria-label')) {
+                const label = element.matches('.art-control-playAndPause') ? '播放或暂停'
+                    : element.matches('.art-control-volume') ? '静音或恢复声音'
+                    : element.textContent.trim() || '播放器控制';
+                element.setAttribute('aria-label', label);
+            }
+        });
+
+        const controlsRow = scope.querySelector('#player .art-controls');
+        if (controlsRow) controlsRow.classList.add('lrud-container');
+
         const customClickables = [];
         if (scope.nodeType === Node.ELEMENT_NODE && scope.matches('[onclick]')) customClickables.push(scope);
         customClickables.push(...scope.querySelectorAll('[onclick]'));
@@ -135,6 +160,29 @@
         return !!(window.LibreTVPlayer && window.LibreTVPlayer.handleRemoteAction(action));
     }
 
+    function isPlayerFullscreen() {
+        return !!(window.LibreTVPlayer && window.LibreTVPlayer.isFullscreen());
+    }
+
+    function isInPlayer(target) {
+        return !!(window.LibreTVPlayer && window.LibreTVPlayer.isPlayerArea(target));
+    }
+
+    function showPlayerControls() {
+        return !!(window.LibreTVPlayer && window.LibreTVPlayer.showControls());
+    }
+
+    function focusPrimaryPlayerControl() {
+        showPlayerControls();
+        enhance(document);
+        const player = document.getElementById('player');
+        if (!player) return false;
+        const preferred = player.querySelector('.art-control-fullscreen:not(.lrud-ignore)')
+            || player.querySelector('.art-control-fullscreenWeb:not(.lrud-ignore)')
+            || player.querySelector('[data-tv-player-control]:not(.lrud-ignore)');
+        return focusElement(preferred);
+    }
+
     function shouldKeepHorizontalInputKey(target, direction) {
         if (!target || (direction !== 'ArrowLeft' && direction !== 'ArrowRight')) return false;
         if (target.matches('select, input[type="range"]')) return true;
@@ -190,6 +238,7 @@
         }
         if (window.LibreTVPlayer && window.LibreTVPlayer.isFullscreen()) {
             window.LibreTVPlayer.exitFullscreen();
+            setTimeout(() => focusElement(document.getElementById('player')), 50);
             return true;
         }
         const results = document.getElementById('resultsArea');
@@ -235,6 +284,16 @@
             if (input) return;
             const handled = target && target.matches('[data-tv-player-surface]') ? playerAction('toggle') : false;
             if (!handled && target && target !== document.body) target.click();
+            if (target && target.matches('.art-control-fullscreen, .art-control-fullscreenWeb')) {
+                setTimeout(() => focusElement(document.getElementById('player')), 50);
+            }
+            if (target && target.matches('.art-control-setting, .art-setting-item')) {
+                setTimeout(() => {
+                    enhance(document);
+                    const settingItem = Array.from(document.querySelectorAll('#player .art-setting-item')).find(isVisible);
+                    if (settingItem) focusElement(settingItem);
+                }, 0);
+            }
             event.preventDefault();
             event.stopImmediatePropagation();
             return;
@@ -243,7 +302,7 @@
         // further press then exits the field, which is essential on remotes.
         if (input && shouldKeepHorizontalInputKey(target, direction)) return;
 
-        if (target && target.matches('[data-tv-player-surface]')) {
+        if (target && isPlayerFullscreen() && isInPlayer(target)) {
             const action = {
                 ArrowLeft: 'seek-backward', ArrowRight: 'seek-forward',
                 ArrowUp: 'volume-up', ArrowDown: 'volume-down'
@@ -254,6 +313,25 @@
                 return;
             }
         }
+
+        if (target && target.matches('[data-tv-player-surface]')) {
+            if (direction === 'ArrowUp' || direction === 'ArrowDown') {
+                if (focusPrimaryPlayerControl()) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    return;
+                }
+            }
+            const action = direction === 'ArrowLeft' ? 'seek-backward'
+                : direction === 'ArrowRight' ? 'seek-forward' : null;
+            if (action && playerAction(action)) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                return;
+            }
+        }
+
+        if (target && target.matches('[data-tv-player-control]')) showPlayerControls();
 
         const scope = syncScope(false);
         const next = lrud.getNextFocus(target, direction, scope);
@@ -278,6 +356,9 @@
             const target = event.target.closest(nativeFocusable);
             if (target && isVisible(target)) target.focus({ preventScroll: true });
         }
+    }, true);
+    document.addEventListener('focusin', event => {
+        if (event.target.matches && event.target.matches('[data-tv-player-control]')) showPlayerControls();
     }, true);
     new MutationObserver(queueRefresh).observe(document.documentElement, {
         childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'disabled', 'aria-hidden']
