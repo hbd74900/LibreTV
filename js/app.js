@@ -1,11 +1,20 @@
 // 全局变量
-let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || '["xiaomaomi","dyttzy", "bfzy", "ruyi"]'); // 默认选中资源
+const DEFAULT_API_SELECTION_VERSION = 'all-built-ins-20260727';
+const allBuiltInAPIs = Object.keys(API_SITES);
+let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || JSON.stringify(allBuiltInAPIs));
 let customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
 
 // 清理旧版本中已移除的内置资源，避免面板计数与实际选项不一致
 selectedAPIs = selectedAPIs.filter(apiId => API_SITES[apiId] || apiId.startsWith('custom_'));
 if (selectedAPIs.length === 0) {
-    selectedAPIs = ['xiaomaomi', 'dyttzy', 'bfzy', 'ruyi'];
+    selectedAPIs = [...allBuiltInAPIs];
+}
+
+// Apply the new all-sources default once while preserving selected custom APIs.
+if (localStorage.getItem('defaultApiSelectionVersion') !== DEFAULT_API_SELECTION_VERSION) {
+    const selectedCustomAPIs = selectedAPIs.filter(apiId => apiId.startsWith('custom_'));
+    selectedAPIs = [...allBuiltInAPIs, ...selectedCustomAPIs];
+    localStorage.setItem('defaultApiSelectionVersion', DEFAULT_API_SELECTION_VERSION);
 }
 localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
 
@@ -34,10 +43,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // 设置默认API选择（如果是第一次加载）
     if (!localStorage.getItem('hasInitializedDefaults')) {
-        // 默认选中资源
-        selectedAPIs = ["xiaomaomi", "bfzy", "dyttzy", "ruyi"];
-        localStorage.setItem('selectedAPIs', JSON.stringify(selectedAPIs));
-
         // 默认选中过滤开关
         localStorage.setItem('yellowFilterEnabled', 'true');
         localStorage.setItem(PLAYER_CONFIG.adFilteringStorage, 'true');
