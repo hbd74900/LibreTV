@@ -207,7 +207,8 @@
                         </button>
                         <!-- 搜索输入 -->
                         <input type="text" 
-                               id="searchInput" 
+                               id="searchInput"
+                               data-tv-initial="true"
                                class="flex-1 bg-[#111] border-y border-[#333] text-white px-6 py-0 focus:outline-none transition-colors min-w-0" 
                                placeholder="搜索你喜欢的视频..." 
                                autocomplete="off"
@@ -318,7 +319,7 @@
     </footer>
 
     <!-- 详情模态框 -->
-    <div id="modal" class="fixed inset-0 bg-black/95 hidden flex items-center justify-center transition-opacity duration-300 z-40">
+    <div id="modal" class="fixed inset-0 bg-black/95 hidden flex items-center justify-center transition-opacity duration-300 z-40" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
         <div class="bg-[#111] p-8 rounded-lg w-11/12 max-w-4xl border border-[#333] max-h-[90vh] flex flex-col">
             <div class="flex justify-between items-center mb-6 flex-none">
                 <h2 id="modalTitle" class="text-2xl font-bold gradient-text break-words pr-4 max-w-[80%]"></h2>
@@ -332,16 +333,16 @@
     </div>
 
     <!-- 密码验证弹窗 -->
-    <div id="passwordModal" class="fixed inset-0 bg-black/95 hidden items-center justify-center z-[65] transition-opacity duration-300">
+    <div id="passwordModal" class="fixed inset-0 bg-black/95 hidden items-center justify-center z-[65] transition-opacity duration-300" role="dialog" aria-modal="true" aria-labelledby="passwordModalTitle">
         <div class="bg-[#111] p-8 rounded-lg w-11/12 max-w-md border border-[#333] max-h-[90vh] flex flex-col">
             <div class="flex justify-between items-center mb-6 flex-none">
-                <h2 class="text-2xl font-bold gradient-text">访问验证</h2>
+                <h2 id="passwordModalTitle" class="text-2xl font-bold gradient-text">访问验证</h2>
             </div>
             <div class="mb-6">
                 <p class="text-gray-300 mb-4">请输入密码继续访问</p>
                 <form id="passwordForm" onsubmit="handlePasswordSubmit(); return false;">
                     <input type="text" name="username" id="username" autocomplete="username" style="display:none" tabindex="-1" aria-hidden="true">
-                    <input type="password" id="passwordInput" class="w-full bg-[#111] border border-[#333] text-white px-4 py-3 rounded-lg focus:outline-none focus:border-white transition-colors" placeholder="密码..." autocomplete="new-password">
+                    <input type="password" id="passwordInput" data-tv-initial="true" class="w-full bg-[#111] border border-[#333] text-white px-4 py-3 rounded-lg focus:outline-none focus:border-white transition-colors" placeholder="密码..." autocomplete="new-password">
                     <div class="mt-4 w-full flex space-x-4">
                         <button id="passwordSubmitBtn" type="submit" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">提交</button>
                         <button id="passwordCancelBtn" type="button" onclick="hidePasswordModal()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">取消</button>
@@ -353,9 +354,9 @@
     </div>
 
     <!-- 版权声明弹窗 -->
-    <div id="disclaimerModal" class="fixed inset-0 bg-black/90 hidden items-center justify-center z-[60]">
+    <div id="disclaimerModal" class="fixed inset-0 bg-black/90 hidden items-center justify-center z-[60]" role="dialog" aria-modal="true" aria-labelledby="disclaimerModalTitle">
         <div class="bg-[#111] p-8 rounded-lg border border-[#333] w-11/12 max-w-2xl max-h-[90vh] overflow-y-auto">
-            <h2 class="text-2xl font-bold gradient-text mb-6 text-center">使用声明</h2>
+            <h2 id="disclaimerModalTitle" class="text-2xl font-bold gradient-text mb-6 text-center">使用声明</h2>
             <div class="text-gray-300 space-y-4">
                 <p>
                     欢迎使用 LibreTV。在开始使用前，请您了解并同意以下条款：
@@ -371,7 +372,7 @@
                 </p>
             </div>
             <div class="mt-6 flex justify-center">
-                <button id="acceptDisclaimerBtn" class="px-6 py-3 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 text-white font-semibold rounded-lg hover:shadow-lg transition-all duration-300">
+                <button id="acceptDisclaimerBtn" data-tv-initial="true" class="px-6 py-3 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 text-white font-semibold rounded-lg hover:shadow-lg transition-all duration-300">
                     我已了解并接受
                 </button>
             </div>
@@ -441,5 +442,7 @@
 
     <!-- 添加弹窗和URL搜索参数处理脚本 -->
     <script src="js/index-page.js"></script>
+    <script src="libs/tv-lrud.min.js"></script>
+    <script src="js/tv-navigation.js?v=20260727-1"></script>
 </body>
 </html>

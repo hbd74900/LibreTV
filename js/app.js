@@ -754,7 +754,7 @@ async function search() {
             const hasCover = item.vod_pic && item.vod_pic.startsWith('http');
 
             return `
-                <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md" 
+                <button type="button" class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full w-full text-left shadow-sm hover:shadow-md"
                      onclick="showDetails('${safeId}','${safeName}','${sourceCode}')" ${apiUrlAttr}>
                     <div class="flex h-full">
                         ${hasCover ? `
@@ -800,7 +800,7 @@ async function search() {
                             </div>
                         </div>
                     </div>
-                </div>
+                </button>
             `;
         }).join('');
 
@@ -1105,7 +1105,8 @@ function renderEpisodes(vodName, sourceCode, vodId) {
         // 根据倒序状态计算真实的剧集索引
         const realIndex = episodesReversed ? currentEpisodes.length - 1 - index : index;
         return `
-            <button id="episode-${realIndex}" onclick="playVideo('${episode}','${vodName.replace(/"/g, '&quot;')}', '${sourceCode}', ${realIndex}, '${vodId}')" 
+            <button id="episode-${realIndex}" onclick="playVideo('${episode}','${vodName.replace(/"/g, '&quot;')}', '${sourceCode}', ${realIndex}, '${vodId}')"
+                    ${index === 0 ? 'data-tv-initial="true"' : ''}
                     class="px-4 py-2 bg-[#222] hover:bg-[#333] border border-[#333] rounded-lg transition-colors text-center episode-btn">
                 ${realIndex + 1}
             </button>

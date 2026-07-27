@@ -534,7 +534,7 @@ function renderDoubanCards(data, container) {
             
             // 为不同设备优化卡片布局
             card.innerHTML = `
-                <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer" onclick="fillAndSearchWithDouban('${safeTitle}')">
+                <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer" role="button" tabindex="0" data-tv-focusable onclick="fillAndSearchWithDouban('${safeTitle}')">
                     <img alt="${safeTitle}"
                         class="w-full h-full object-cover transition-transform duration-500 hover:scale-110"
                         loading="lazy" referrerpolicy="no-referrer">

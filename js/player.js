@@ -359,6 +359,148 @@ function handleKeyboardShortcuts(e) {
     }
 }
 
+function updateMediaSessionPosition() {
+    if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState || !art || !art.video) return;
+    const duration = art.video.duration;
+    const position = art.video.currentTime;
+    if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(position)) return;
+    try {
+        navigator.mediaSession.setPositionState({
+            duration,
+            playbackRate: art.video.playbackRate || 1,
+            position: Math.min(Math.max(position, 0), duration)
+        });
+    } catch (error) {
+        // Some TV browsers expose Media Session incompletely.
+    }
+}
+
+function setupMediaSession() {
+    if (!('mediaSession' in navigator) || !art) return;
+    try {
+        if ('MediaMetadata' in window) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: currentVideoTitle,
+                album: currentEpisodes.length ? `第 ${currentEpisodeIndex + 1} 集` : 'LibreTV',
+                artwork: [{ src: new URL('image/logo.png', window.location.href).href, sizes: '512x512', type: 'image/png' }]
+            });
+        }
+        const handlers = {
+            play: () => window.LibreTVPlayer.handleRemoteAction('play'),
+            pause: () => window.LibreTVPlayer.handleRemoteAction('pause'),
+            stop: () => window.LibreTVPlayer.handleRemoteAction('stop'),
+            seekbackward: details => window.LibreTVPlayer.handleRemoteAction('seek-backward', details.seekOffset),
+            seekforward: details => window.LibreTVPlayer.handleRemoteAction('seek-forward', details.seekOffset),
+            seekto: details => window.LibreTVPlayer.handleRemoteAction('seek-to', details.seekTime),
+            previoustrack: () => window.LibreTVPlayer.handleRemoteAction('previous'),
+            nexttrack: () => window.LibreTVPlayer.handleRemoteAction('next')
+        };
+        Object.entries(handlers).forEach(([action, handler]) => {
+            try {
+                navigator.mediaSession.setActionHandler(action, handler);
+            } catch (error) {
+                // Unsupported actions differ between television engines.
+            }
+        });
+        if (art.video) {
+            art.video.addEventListener('timeupdate', updateMediaSessionPosition);
+            art.video.addEventListener('durationchange', updateMediaSessionPosition);
+        }
+    } catch (error) {
+        console.warn('Media Session setup failed:', error);
+    }
+}
+
+window.LibreTVPlayer = {
+    isPlayerSurface(target) {
+        return !!(target && target.closest && target.closest('[data-tv-player-surface]'));
+    },
+    isFullscreen() {
+        return !!(document.fullscreenElement || (art && (art.fullscreen || art.fullscreenWeb)));
+    },
+    exitFullscreen() {
+        if (art) {
+            art.fullscreen = false;
+            art.fullscreenWeb = false;
+        }
+        if (document.fullscreenElement && document.exitFullscreen) {
+            document.exitFullscreen().catch(() => {});
+        }
+    },
+    goBack() {
+        goBack();
+        return true;
+    },
+    handleRemoteAction(action, value) {
+        if (action === 'back') return this.goBack();
+        if (!art) return false;
+        const seekStep = Number.isFinite(value) ? value : 5;
+        switch (action) {
+            case 'toggle':
+                if (art.video && art.video.paused) art.video.play().catch(() => {});
+                else if (art.video) art.video.pause();
+                else art.pause();
+                showShortcutHint('播放/暂停', 'play');
+                break;
+            case 'play':
+                if (art.video) art.video.play().catch(() => {});
+                else art.play();
+                break;
+            case 'pause':
+                if (art.video) art.video.pause();
+                else art.pause();
+                break;
+            case 'stop':
+                if (art.video) art.video.pause();
+                else art.pause();
+                art.currentTime = 0;
+                break;
+            case 'seek-backward':
+                art.currentTime = Math.max(0, art.currentTime - seekStep);
+                showShortcutHint('快退', 'left');
+                break;
+            case 'seek-forward':
+                art.currentTime = Math.min(art.duration || Infinity, art.currentTime + seekStep);
+                showShortcutHint('快进', 'right');
+                break;
+            case 'seek-to':
+                if (Number.isFinite(value)) art.currentTime = Math.min(Math.max(value, 0), art.duration || value);
+                break;
+            case 'volume-up':
+                art.volume = Math.min(1, art.volume + 0.1);
+                showShortcutHint('音量+', 'up');
+                break;
+            case 'volume-down':
+                art.volume = Math.max(0, art.volume - 0.1);
+                showShortcutHint('音量-', 'down');
+                break;
+            case 'previous':
+                playPreviousEpisode();
+                break;
+            case 'next':
+                playNextEpisode();
+                break;
+            case 'fullscreen':
+                art.fullscreen = !art.fullscreen;
+                break;
+            default:
+                return false;
+        }
+        return true;
+    }
+};
+
+try {
+    if (window.tizen && tizen.tvinputdevice && typeof tizen.tvinputdevice.registerKeyBatch === 'function') {
+        tizen.tvinputdevice.registerKeyBatch([
+            'MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop',
+            'MediaFastForward', 'MediaRewind', 'MediaTrackPrevious', 'MediaTrackNext'
+        ]);
+    }
+} catch (error) {
+    console.warn('Tizen remote key registration failed:', error);
+}
+
 // 显示快捷键提示
 function showShortcutHint(text, direction) {
     const hintElement = document.getElementById('shortcutHint');
@@ -582,6 +724,8 @@ function initPlayer(videoUrl) {
             }
         }
     });
+
+    setupMediaSession();
 
     // artplayer 没有 'fullscreenWeb:enter', 'fullscreenWeb:exit' 等事件
     // 所以原控制栏隐藏代码并没有起作用
@@ -873,8 +1017,9 @@ function renderEpisodes() {
         const isActive = realIndex === currentEpisodeIndex;
 
         html += `
-            <button id="episode-${realIndex}" 
+            <button id="episode-${realIndex}"
                     onclick="playEpisode(${realIndex})" 
+                    ${isActive ? 'data-tv-initial="true" aria-current="true"' : ''}
                     class="px-4 py-2 ${isActive ? 'episode-active' : '!bg-[#222] hover:!bg-[#333] hover:!shadow-none'} !border ${isActive ? '!border-blue-500' : '!border-[#333]'} rounded-lg transition-colors text-center episode-btn">
                 ${realIndex + 1}
             </button>
@@ -1676,7 +1821,8 @@ async function showSwitchResourceModal() {
         const speedResult = speedResults[sourceKey] || { speed: -1, error: '未测试' };
         
         html += `
-            <div class="relative group ${isCurrentSource ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:scale-105 transition-transform'}" 
+            <div class="relative group ${isCurrentSource ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:scale-105 transition-transform'}"
+                 ${!isCurrentSource ? 'role="button" tabindex="0" data-tv-focusable' : 'aria-current="true"'}
                  ${!isCurrentSource ? `onclick="switchToResource('${sourceKey}', '${result.vod_id}')"` : ''}>
                 <div class="aspect-[2/3] rounded-lg overflow-hidden bg-gray-800 relative">
                     <img src="${result.vod_pic}" 
