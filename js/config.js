@@ -31,6 +31,11 @@ const API_SITES = {
         api: 'https://cj.rycjapi.com/api.php/provide/vod',
         name: '如意资源'
     },
+    ikanbot: {
+        api: 'https://www1.ikanbot.com',
+        name: '爱看机器人资源',
+        special: 'ikanbot'
+    },
     bfzy: {
         api: 'https://bfzyapi.com/api.php/provide/vod',
         name: '暴风资源'

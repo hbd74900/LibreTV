@@ -1,5 +1,9 @@
 async function searchByAPIAndKeyWord(apiId, query) {
     try {
+        if (typeof isIkanbotSource === 'function' && isIkanbotSource(apiId)) {
+            return await searchIkanbotByKeyword(query, apiId);
+        }
+
         let apiUrl, apiName, apiBaseUrl;
         
         // 处理自定义API

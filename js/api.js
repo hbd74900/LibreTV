@@ -1,4 +1,189 @@
 // 改进的API请求处理函数
+const IKANBOT_SOURCE_KEY = 'ikanbot';
+
+function isIkanbotSource(sourceCode) {
+    return sourceCode === IKANBOT_SOURCE_KEY
+        && API_SITES[sourceCode]
+        && API_SITES[sourceCode].special === IKANBOT_SOURCE_KEY;
+}
+
+async function fetchIkanbotContent(targetUrl, responseType = 'text') {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+    try {
+        const proxyPath = PROXY_URL + encodeURIComponent(targetUrl);
+        const proxiedUrl = window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl
+            ? await window.ProxyAuth.addAuthToProxyUrl(proxyPath)
+            : proxyPath;
+        const response = await fetch(proxiedUrl, {
+            headers: {
+                'Accept': responseType === 'json'
+                    ? 'application/json, text/plain, */*'
+                    : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            },
+            signal: controller.signal
+        });
+
+        if (!response.ok) {
+            throw new Error(`爱看机器人请求失败: ${response.status}`);
+        }
+        return responseType === 'json' ? response.json() : response.text();
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+function parseIkanbotDocument(html) {
+    const documentNode = new DOMParser().parseFromString(html, 'text/html');
+    if (documentNode.title.includes('Attention Required') || documentNode.querySelector('#cf-error-details')) {
+        throw new Error('爱看机器人暂时拒绝了请求');
+    }
+    return documentNode;
+}
+
+function parseIkanbotSearchResults(html, sourceCode = IKANBOT_SOURCE_KEY) {
+    const documentNode = parseIkanbotDocument(html);
+    const sourceName = API_SITES[sourceCode].name;
+    const seenIds = new Set();
+    const results = [];
+
+    documentNode.querySelectorAll('a.title-text[href*="/play/"]').forEach(anchor => {
+        const idMatch = (anchor.getAttribute('href') || '').match(/\/play\/(\d+)/);
+        if (!idMatch || seenIds.has(idMatch[1])) return;
+
+        const card = anchor.closest('.media') || anchor.parentElement;
+        const image = card ? card.querySelector('img[data-src], img') : null;
+        const label = card ? card.querySelector('.label') : null;
+        const smallText = card
+            ? Array.from(card.querySelectorAll('.small')).map(element => element.textContent.trim()).filter(Boolean)
+            : [];
+        const rawTitle = anchor.textContent.trim();
+        const yearMatch = rawTitle.match(/(?:19|20)\d{2}(?!.*(?:19|20)\d{2})/);
+        const title = (image && image.getAttribute('alt') || rawTitle.replace(/\s+(?:19|20)\d{2}\s*$/, '')).trim();
+        const cover = image && (image.getAttribute('data-src') || image.getAttribute('src')) || '';
+
+        seenIds.add(idMatch[1]);
+        results.push({
+            vod_id: idMatch[1],
+            vod_name: title,
+            vod_pic: /^https?:\/\//i.test(cover) ? cover : '',
+            vod_remarks: label ? label.textContent.trim().replace(/^\[|\]$/g, '') : '',
+            vod_year: yearMatch ? yearMatch[0] : '',
+            vod_area: smallText[0] || '',
+            vod_actor: smallText[1] || '',
+            type_name: '影视',
+            source_name: sourceName,
+            source_code: sourceCode
+        });
+    });
+
+    return results;
+}
+
+async function searchIkanbotByKeyword(query, sourceCode = IKANBOT_SOURCE_KEY) {
+    const baseUrl = API_SITES[sourceCode].api.replace(/\/$/, '');
+    const html = await fetchIkanbotContent(`${baseUrl}/search?q=${encodeURIComponent(query)}`);
+    return parseIkanbotSearchResults(html, sourceCode);
+}
+
+function makeIkanbotToken(videoId, encryptedToken) {
+    let remaining = String(encryptedToken || '');
+    const output = [];
+    const suffix = String(videoId || '').slice(-4);
+    if (!/^\d{4}$/.test(suffix) || !remaining) {
+        throw new Error('爱看机器人播放令牌参数缺失');
+    }
+
+    for (const digit of suffix) {
+        const start = Number(digit) % 3 + 1;
+        if (remaining.length < start + 8) {
+            throw new Error('爱看机器人播放令牌格式已变化');
+        }
+        output.push(remaining.substring(start, start + 8));
+        remaining = remaining.substring(start + 8);
+    }
+    return output.join('');
+}
+
+function parseIkanbotEpisodeGroup(group) {
+    if (!group || typeof group.url !== 'string') return [];
+    return group.url.split('#').map(part => {
+        const delimiter = part.indexOf('$');
+        return (delimiter >= 0 ? part.substring(delimiter + 1) : part).trim();
+    }).filter(mediaUrl => /^https?:\/\//i.test(mediaUrl)
+        && /\.(?:m3u8|mp4)(?:[?#]|$)/i.test(mediaUrl));
+}
+
+function selectIkanbotEpisodes(providers) {
+    const candidates = [];
+    for (const provider of providers || []) {
+        try {
+            const groups = JSON.parse(provider.resData || '[]');
+            for (const group of Array.isArray(groups) ? groups : [groups]) {
+                const episodes = parseIkanbotEpisodeGroup(group);
+                if (episodes.length > 0) candidates.push(episodes);
+            }
+        } catch (error) {
+            console.warn('爱看机器人线路解析失败:', error);
+        }
+    }
+    candidates.sort((left, right) => right.length - left.length);
+    return candidates[0] || [];
+}
+
+async function handleIkanbotDetail(id, sourceCode = IKANBOT_SOURCE_KEY) {
+    const site = API_SITES[sourceCode];
+    const baseUrl = site.api.replace(/\/$/, '');
+    const detailUrl = `${baseUrl}/play/${encodeURIComponent(id)}`;
+    const html = await fetchIkanbotContent(detailUrl);
+    const documentNode = parseIkanbotDocument(html);
+    const fieldValue = fieldId => {
+        const element = documentNode.getElementById(fieldId);
+        return element ? String(element.value || '').trim() : '';
+    };
+    const currentId = fieldValue('current_id');
+    const mediaType = fieldValue('mtype');
+    const token = makeIkanbotToken(currentId, fieldValue('e_token'));
+    const resourceUrl = `${baseUrl}/api/getResN?videoId=${encodeURIComponent(currentId)}`
+        + `&mtype=${encodeURIComponent(mediaType)}&token=${encodeURIComponent(token)}`;
+    const resourceData = await fetchIkanbotContent(resourceUrl, 'json');
+
+    if (!resourceData || resourceData.state !== 1 || !resourceData.data) {
+        throw new Error(resourceData && resourceData.message || '爱看机器人没有返回播放线路');
+    }
+
+    const providers = Array.isArray(resourceData.data.list) ? resourceData.data.list : [];
+    const episodes = selectIkanbotEpisodes(providers);
+    const titleElement = documentNode.getElementById('video_title');
+    const infoRoot = documentNode.querySelector('.item.result-info .detail');
+    const metadata = infoRoot
+        ? Array.from(infoRoot.querySelectorAll('h3.meta')).map(element => element.textContent.trim())
+        : [];
+    const coverElement = documentNode.querySelector('.item.result-info img[data-src], .item.result-info img');
+    const cover = coverElement && (coverElement.getAttribute('data-src') || coverElement.getAttribute('src')) || '';
+    const castParts = (metadata[3] || '').split('/');
+
+    return JSON.stringify({
+        code: 200,
+        episodes,
+        detailUrl,
+        videoInfo: {
+            title: titleElement ? titleElement.textContent.trim() : '',
+            cover: /^https?:\/\//i.test(cover) ? cover : '',
+            desc: metadata[0] || '',
+            type: '影视',
+            year: metadata[1] || '',
+            area: metadata[2] || '',
+            director: castParts[0] || '',
+            actor: castParts.slice(1).join('/') || '',
+            remarks: providers.length ? `${providers.length} 条可选线路，已自动选择集数最完整的线路` : '',
+            source_name: site.name,
+            source_code: sourceCode
+        }
+    });
+}
+
 async function handleApiRequest(url) {
     const customApi = url.searchParams.get('customApi') || '';
     const customDetail = url.searchParams.get('customDetail') || '';
@@ -16,6 +201,11 @@ async function handleApiRequest(url) {
                 throw new Error('使用自定义API时必须提供API地址');
             }
             
+            if (isIkanbotSource(source)) {
+                const results = await searchIkanbotByKeyword(searchQuery, source);
+                return JSON.stringify({ code: 200, list: results });
+            }
+
             if (!API_SITES[source] && source !== 'custom') {
                 throw new Error('无效的API来源');
             }
@@ -91,6 +281,10 @@ async function handleApiRequest(url) {
                 throw new Error('使用自定义API时必须提供API地址');
             }
             
+            if (isIkanbotSource(sourceCode)) {
+                return await handleIkanbotDetail(id, sourceCode);
+            }
+
             if (!API_SITES[sourceCode] && sourceCode !== 'custom') {
                 throw new Error('无效的API来源');
             }
@@ -369,6 +563,10 @@ async function handleAggregatedSearch(searchQuery) {
     // 创建所有API源的搜索请求
     const searchPromises = availableSources.map(async (source) => {
         try {
+            if (isIkanbotSource(source)) {
+                return await searchIkanbotByKeyword(searchQuery, source);
+            }
+
             const apiUrl = `${API_SITES[source].api}${API_CONFIG.search.path}${encodeURIComponent(searchQuery)}`;
             
             // 使用Promise.race添加超时处理
