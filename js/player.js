@@ -95,7 +95,7 @@ let proxyFallbackAttemptedForUrl = '';
 let zuidMirrorFallbackAttemptedForUrl = '';
 let playbackGeneration = 0;
 let playbackStartRequest = 0;
-const DISABLED_PLAYBACK_SOURCES = new Set(['xiaomaomi']);
+const DISABLED_PLAYBACK_SOURCES = new Set(['xiaomaomi', 'ffzy', 'zy360']);
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
 function escapeMediaAttribute(value) {
