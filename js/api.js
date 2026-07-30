@@ -7,6 +7,47 @@ function isIkanbotSource(sourceCode) {
         && API_SITES[sourceCode].special === IKANBOT_SOURCE_KEY;
 }
 
+function parseEpisodeGroup(playSource, directOnly = false) {
+    return String(playSource || '').split('#').map(part => {
+        const delimiter = part.indexOf('$');
+        return (delimiter >= 0 ? part.substring(delimiter + 1) : part).trim();
+    }).filter(mediaUrl => {
+        if (!/^https?:\/\//i.test(mediaUrl)) return false;
+        return !directOnly || /\.(?:m3u8|mp4)(?:[?#]|$)/i.test(mediaUrl);
+    });
+}
+
+function selectPlayableEpisodes(videoDetail) {
+    const playGroups = String(videoDetail.vod_play_url || '').split('$$$');
+    const providerNames = String(videoDetail.vod_play_from || '').split('$$$');
+    const candidates = playGroups.map((group, index) => {
+        const episodes = parseEpisodeGroup(group);
+        const directEpisodes = parseEpisodeGroup(group, true);
+        const providerName = providerNames[index] || '';
+        const providerClaimsDirectMedia = /(?:m3u8|mp4)/i.test(providerName);
+        return {
+            index,
+            episodes,
+            directEpisodes,
+            isDirect: directEpisodes.length > 0 || providerClaimsDirectMedia,
+            score: directEpisodes.length * 1000
+                + (providerClaimsDirectMedia ? 100 : 0)
+                + episodes.length
+        };
+    });
+
+    const directCandidates = candidates
+        .filter(candidate => candidate.isDirect && candidate.episodes.length > 0)
+        .sort((left, right) => right.score - left.score || left.index - right.index);
+    if (directCandidates.length > 0) {
+        const selected = directCandidates[0];
+        return selected.directEpisodes.length > 0 ? selected.directEpisodes : selected.episodes;
+    }
+
+    const fallback = candidates.find(candidate => candidate.episodes.length > 0);
+    return fallback ? fallback.episodes : [];
+}
+
 async function fetchIkanbotContent(targetUrl, responseType = 'text') {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 20000);
@@ -343,21 +384,7 @@ async function handleApiRequest(url) {
                 let episodes = [];
                 
                 if (videoDetail.vod_play_url) {
-                    // 分割不同播放源
-                    const playSources = videoDetail.vod_play_url.split('$$$');
-                    
-                    // 提取第一个播放源的集数（通常为主要源）
-                    if (playSources.length > 0) {
-                        const mainSource = playSources[0];
-                        const episodeList = mainSource.split('#');
-                        
-                        // 从每个集数中提取URL
-                        episodes = episodeList.map(ep => {
-                            const parts = ep.split('$');
-                            // 返回URL部分(通常是第二部分，如果有的话)
-                            return parts.length > 1 ? parts[1] : '';
-                        }).filter(url => url && (url.startsWith('http://') || url.startsWith('https://')));
-                    }
+                    episodes = selectPlayableEpisodes(videoDetail);
                 }
                 
                 // 如果没有找到播放地址，尝试使用正则表达式查找m3u8链接
