@@ -56,6 +56,10 @@ const API_SITES = {
         api: 'https://api.apibdzy.com/api.php/provide/vod',
         name: '百度云资源'
     },
+    wujin: {
+        api: 'https://api.wujinapi.me/api.php/provide/vod',
+        name: '无尽资源'
+    },
 };
 
 // 定义合并方法

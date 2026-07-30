@@ -95,7 +95,7 @@ let proxyFallbackAttemptedForUrl = '';
 let zuidMirrorFallbackAttemptedForUrl = '';
 let playbackGeneration = 0;
 let playbackStartRequest = 0;
-const DISABLED_PLAYBACK_SOURCES = new Set(['dyttzy', 'xiaomaomi', 'ffzy', 'zy360', 'wujin']);
+const DISABLED_PLAYBACK_SOURCES = new Set(['dyttzy', 'xiaomaomi', 'ffzy', 'zy360']);
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
 function escapeMediaAttribute(value) {
@@ -595,6 +595,19 @@ function buildZuidMirrorUrl(directUrl) {
     }
 }
 
+function buildWujinMirrorUrl(directUrl) {
+    try {
+        const url = new URL(directUrl);
+        const hostMatch = url.hostname.match(/^v(\d+)\.ppqrrs\.com$/i);
+        if (!hostMatch) return '';
+
+        url.hostname = `v${hostMatch[1]}.adfg8.vip`;
+        return url.href;
+    } catch (error) {
+        return '';
+    }
+}
+
 function proxyRejectsPlaybackHost(directUrl) {
     const host = playbackHost(directUrl);
     return host === 'zuidazym3u8.com'
@@ -604,6 +617,7 @@ function proxyRejectsPlaybackHost(directUrl) {
 function shouldStartThroughProxy(directUrl) {
     const source = new URLSearchParams(window.location.search).get('source') || '';
     if (buildZuidMirrorUrl(directUrl)) return true;
+    if (buildWujinMirrorUrl(directUrl)) return true;
     if (source === 'zuid') return false;
     if (source === 'ruyi') return true;
 
@@ -630,21 +644,22 @@ async function startPlayback(directUrl) {
     }
     const requestId = ++playbackStartRequest;
     zuidMirrorFallbackAttemptedForUrl = '';
+    const compatibleUrl = buildZuidMirrorUrl(directUrl) || buildWujinMirrorUrl(directUrl) || directUrl;
 
     if (!shouldStartThroughProxy(directUrl)) {
-        initPlayer(directUrl);
+        initPlayer(compatibleUrl, { directUrl });
         return;
     }
 
     showPlaybackLoading('正在通过兼容线路连接视频...');
     try {
-        const proxyUrl = await authenticatedProxyUrl(buildZuidMirrorUrl(directUrl) || directUrl);
+        const proxyUrl = await authenticatedProxyUrl(compatibleUrl);
         if (requestId !== playbackStartRequest) return;
         if (!/[?&]auth=/.test(proxyUrl)) throw new Error('代理鉴权信息不可用');
         proxyFallbackAttemptedForUrl = directUrl;
         initPlayer(proxyUrl, { directUrl, isProxy: true });
     } catch (error) {
-        if (requestId === playbackStartRequest) initPlayer(directUrl);
+        if (requestId === playbackStartRequest) initPlayer(compatibleUrl, { directUrl });
     }
 }
 
@@ -655,7 +670,7 @@ async function retryPlaybackThroughProxy(directUrl, generation) {
     showPlaybackLoading('直连失败，正在通过兼容线路重试...');
 
     try {
-        const proxyUrl = await authenticatedProxyUrl(directUrl);
+        const proxyUrl = await authenticatedProxyUrl(buildWujinMirrorUrl(directUrl) || directUrl);
         if (generation && generation !== playbackGeneration) return false;
         if (!/[?&]auth=/.test(proxyUrl)) throw new Error('代理鉴权信息不可用');
         setTimeout(() => {
