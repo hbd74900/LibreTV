@@ -95,7 +95,7 @@ let proxyFallbackAttemptedForUrl = '';
 let zuidMirrorFallbackAttemptedForUrl = '';
 let playbackGeneration = 0;
 let playbackStartRequest = 0;
-const DISABLED_PLAYBACK_SOURCES = new Set(['ffzy', 'zy360']);
+const DISABLED_PLAYBACK_SOURCES = new Set(['zy360']);
 const xiaomaomiPlaybackCache = new Map();
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
@@ -610,6 +610,8 @@ function buildWujinMirrorUrl(directUrl) {
 }
 
 function proxyRejectsPlaybackHost(directUrl) {
+    const source = new URLSearchParams(window.location.search).get('source') || '';
+    if (source === 'ffzy') return true;
     const host = playbackHost(directUrl);
     return host === 'zuidazym3u8.com'
         || host.endsWith('.zuidazym3u8.com');

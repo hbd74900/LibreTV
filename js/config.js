@@ -39,6 +39,10 @@ const API_SITES = {
         api: 'https://bfzyapi.com/api.php/provide/vod',
         name: '暴风资源'
     },
+    ffzy: {
+        api: 'https://api.ffzyapi.com/api.php/provide/vod',
+        name: '非凡影视'
+    },
     xiaomaomi: {
         api: 'https://zy.xiaomaomi.cc/api.php/provide/vod',
         name: '小猫咪资源',
