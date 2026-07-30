@@ -92,6 +92,7 @@ let adFilteringEnabled = true; // 默认开启广告过滤
 let progressSaveInterval = null; // 定期保存进度的计时器
 let currentVideoUrl = ''; // 记录当前实际的视频URL
 let proxyFallbackAttemptedForUrl = '';
+let zuidMirrorFallbackAttemptedForUrl = '';
 let playbackGeneration = 0;
 let playbackStartRequest = 0;
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
@@ -569,8 +570,40 @@ function showPlaybackLoading(message) {
     `;
 }
 
-function shouldStartThroughProxy() {
+function playbackHost(directUrl) {
+    try {
+        return new URL(directUrl).hostname.toLowerCase();
+    } catch (error) {
+        return '';
+    }
+}
+
+function buildZuidMirrorUrl(directUrl) {
+    try {
+        const url = new URL(directUrl);
+        if (!/^v\d+\.zuidazym3u8\.com$/i.test(url.hostname)) return '';
+
+        const pathMatch = url.pathname.match(/^\/(yyv\d+)\/(.+)\/video\/index\.m3u8$/i);
+        if (!pathMatch) return '';
+
+        url.hostname = `${pathMatch[1].toLowerCase()}.qwe132456.cc`;
+        url.pathname = `/${pathMatch[1]}/${pathMatch[2]}/video/2000k_1080/hls/index.m3u8`;
+        return url.href;
+    } catch (error) {
+        return '';
+    }
+}
+
+function proxyRejectsPlaybackHost(directUrl) {
+    const host = playbackHost(directUrl);
+    return host === 'zuidazym3u8.com'
+        || host.endsWith('.zuidazym3u8.com');
+}
+
+function shouldStartThroughProxy(directUrl) {
     const source = new URLSearchParams(window.location.search).get('source') || '';
+    if (buildZuidMirrorUrl(directUrl)) return true;
+    if (source === 'zuid') return false;
     return source === 'ruyi'
         || !!(window.MediaCompat && window.MediaCompat.shouldPreferProxy());
 }
@@ -588,15 +621,16 @@ async function authenticatedProxyUrl(directUrl) {
 async function startPlayback(directUrl) {
     if (!directUrl) return;
     const requestId = ++playbackStartRequest;
+    zuidMirrorFallbackAttemptedForUrl = '';
 
-    if (!shouldStartThroughProxy()) {
+    if (!shouldStartThroughProxy(directUrl)) {
         initPlayer(directUrl);
         return;
     }
 
     showPlaybackLoading('正在通过兼容线路连接视频...');
     try {
-        const proxyUrl = await authenticatedProxyUrl(directUrl);
+        const proxyUrl = await authenticatedProxyUrl(buildZuidMirrorUrl(directUrl) || directUrl);
         if (requestId !== playbackStartRequest) return;
         if (!/[?&]auth=/.test(proxyUrl)) throw new Error('代理鉴权信息不可用');
         proxyFallbackAttemptedForUrl = directUrl;
@@ -813,7 +847,20 @@ function initPlayer(videoUrl, playbackOptions = {}) {
                         // 尝试恢复错误
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
-                                if (!isProxyPlayback && proxyFallbackAttemptedForUrl !== directUrl) {
+                                if (isProxyPlayback
+                                    && buildZuidMirrorUrl(directUrl)
+                                    && zuidMirrorFallbackAttemptedForUrl !== directUrl) {
+                                    playbackRecoveryInProgress = true;
+                                    zuidMirrorFallbackAttemptedForUrl = directUrl;
+                                    hls.stopLoad();
+                                    setTimeout(() => {
+                                        if (generation === playbackGeneration) {
+                                            initPlayer(directUrl, { directUrl });
+                                        }
+                                    }, 0);
+                                } else if (!isProxyPlayback
+                                    && !proxyRejectsPlaybackHost(directUrl)
+                                    && proxyFallbackAttemptedForUrl !== directUrl) {
                                     playbackRecoveryInProgress = true;
                                     hls.stopLoad();
                                     retryPlaybackThroughProxy(directUrl, generation);
