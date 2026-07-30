@@ -95,6 +95,7 @@ let proxyFallbackAttemptedForUrl = '';
 let zuidMirrorFallbackAttemptedForUrl = '';
 let playbackGeneration = 0;
 let playbackStartRequest = 0;
+const DISABLED_PLAYBACK_SOURCES = new Set(['dyttzy', 'xiaomaomi', 'ffzy', 'zy360', 'wujin']);
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
 function escapeMediaAttribute(value) {
@@ -604,8 +605,10 @@ function shouldStartThroughProxy(directUrl) {
     const source = new URLSearchParams(window.location.search).get('source') || '';
     if (buildZuidMirrorUrl(directUrl)) return true;
     if (source === 'zuid') return false;
-    return source === 'ruyi'
-        || !!(window.MediaCompat && window.MediaCompat.shouldPreferProxy());
+    if (source === 'ruyi') return true;
+
+    const remoteMode = !!(window.MediaCompat && window.MediaCompat.shouldPreferProxy());
+    return remoteMode && ['ikanbot', 'iqiyi', 'jisu', 'mdzy'].includes(source);
 }
 
 async function authenticatedProxyUrl(directUrl) {
@@ -620,6 +623,11 @@ async function authenticatedProxyUrl(directUrl) {
 
 async function startPlayback(directUrl) {
     if (!directUrl) return;
+    const source = new URLSearchParams(window.location.search).get('source') || '';
+    if (DISABLED_PLAYBACK_SOURCES.has(source)) {
+        showError('该资源的视频线路当前不可用，请返回并切换其他资源');
+        return;
+    }
     const requestId = ++playbackStartRequest;
     zuidMirrorFallbackAttemptedForUrl = '';
 

@@ -1,5 +1,5 @@
 // 全局变量
-const DEFAULT_API_SELECTION_VERSION = 'all-built-ins-ikanbot-20260729';
+const DEFAULT_API_SELECTION_VERSION = 'verified-playable-sources-20260730';
 const allBuiltInAPIs = Object.keys(API_SITES);
 let selectedAPIs = JSON.parse(localStorage.getItem('selectedAPIs') || JSON.stringify(allBuiltInAPIs));
 let customAPIs = JSON.parse(localStorage.getItem('customAPIs') || '[]'); // 存储自定义API列表
