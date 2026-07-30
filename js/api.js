@@ -1,10 +1,17 @@
 // 改进的API请求处理函数
 const IKANBOT_SOURCE_KEY = 'ikanbot';
+const XIAOMAOMI_SOURCE_KEY = 'xiaomaomi';
 
 function isIkanbotSource(sourceCode) {
     return sourceCode === IKANBOT_SOURCE_KEY
         && API_SITES[sourceCode]
         && API_SITES[sourceCode].special === IKANBOT_SOURCE_KEY;
+}
+
+function isXiaomaomiSource(sourceCode) {
+    return sourceCode === XIAOMAOMI_SOURCE_KEY
+        && API_SITES[sourceCode]
+        && API_SITES[sourceCode].special === XIAOMAOMI_SOURCE_KEY;
 }
 
 function parseEpisodeGroup(playSource, directOnly = false) {
@@ -15,6 +22,36 @@ function parseEpisodeGroup(playSource, directOnly = false) {
         if (!/^https?:\/\//i.test(mediaUrl)) return false;
         return !directOnly || /\.(?:m3u8|mp4)(?:[?#]|$)/i.test(mediaUrl);
     });
+}
+
+function isXiaomaomiEpisodeUrl(mediaUrl) {
+    try {
+        const hostname = new URL(mediaUrl).hostname.toLowerCase();
+        return ['qq.com', 'iqiyi.com', 'youku.com', 'bilibili.com', 'mgtv.com']
+            .some(host => hostname === host || hostname.endsWith(`.${host}`));
+    } catch {
+        return false;
+    }
+}
+
+function selectXiaomaomiEpisodes(videoDetail) {
+    const candidates = String(videoDetail.vod_play_url || '').split('$$$')
+        .map(group => {
+            const parts = String(group || '').split('#');
+            const episodes = parseEpisodeGroup(group).filter(isXiaomaomiEpisodeUrl);
+            const numberedEpisodes = parts.filter(part => {
+                const label = part.split('$', 1)[0].trim();
+                return /^(?:第\s*)?\d+(?:\s*[集话期])?$|^(?:ep|e)\s*\d+$/i.test(label);
+            }).length;
+            return { episodes, numberedEpisodes };
+        })
+        .filter(candidate => candidate.episodes.length > 0);
+
+    const serialCandidates = candidates
+        .filter(candidate => candidate.numberedEpisodes >= 2)
+        .sort((left, right) => right.numberedEpisodes - left.numberedEpisodes
+            || right.episodes.length - left.episodes.length);
+    return (serialCandidates[0] || candidates[0] || {}).episodes || [];
 }
 
 function selectPlayableEpisodes(videoDetail) {
@@ -384,7 +421,9 @@ async function handleApiRequest(url) {
                 let episodes = [];
                 
                 if (videoDetail.vod_play_url) {
-                    episodes = selectPlayableEpisodes(videoDetail);
+                    episodes = isXiaomaomiSource(sourceCode)
+                        ? selectXiaomaomiEpisodes(videoDetail)
+                        : selectPlayableEpisodes(videoDetail);
                 }
                 
                 // 如果没有找到播放地址，尝试使用正则表达式查找m3u8链接
@@ -805,7 +844,7 @@ async function handleMultipleCustomSearch(searchQuery, customApiUrls) {
     window.fetch = async function(input, init) {
         const requestUrl = typeof input === 'string' ? new URL(input, window.location.origin) : input.url;
         
-        if (requestUrl.pathname.startsWith('/api/')) {
+        if (requestUrl.pathname === '/api/search' || requestUrl.pathname === '/api/detail') {
             if (window.isPasswordProtected && window.isPasswordVerified) {
                 if (window.isPasswordProtected() && !window.isPasswordVerified()) {
                     return;

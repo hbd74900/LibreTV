@@ -95,7 +95,8 @@ let proxyFallbackAttemptedForUrl = '';
 let zuidMirrorFallbackAttemptedForUrl = '';
 let playbackGeneration = 0;
 let playbackStartRequest = 0;
-const DISABLED_PLAYBACK_SOURCES = new Set(['xiaomaomi', 'ffzy', 'zy360']);
+const DISABLED_PLAYBACK_SOURCES = new Set(['ffzy', 'zy360']);
+const xiaomaomiPlaybackCache = new Map();
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
 function escapeMediaAttribute(value) {
@@ -635,6 +636,41 @@ async function authenticatedProxyUrl(directUrl) {
         : proxyPath;
 }
 
+async function resolveXiaomaomiPlaybackUrl(sourceUrl) {
+    const cached = xiaomaomiPlaybackCache.get(sourceUrl);
+    if (cached && cached.expiresAt > Date.now()) return cached.url;
+
+    const endpoint = window.ProxyAuth && window.ProxyAuth.addAuthToProxyUrl
+        ? await window.ProxyAuth.addAuthToProxyUrl('/api/xiaomaomi-resolve')
+        : '/api/xiaomaomi-resolve';
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+    try {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: sourceUrl }),
+            signal: controller.signal
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload || payload.code !== 200 || !/^https:\/\//i.test(payload.url || '')) {
+            throw new Error(payload && payload.msg || `解析服务响应异常 (${response.status})`);
+        }
+
+        xiaomaomiPlaybackCache.set(sourceUrl, {
+            url: payload.url,
+            expiresAt: Date.now() + 4 * 60 * 1000
+        });
+        return payload.url;
+    } catch (error) {
+        if (error && error.name === 'AbortError') throw new Error('小猫咪视频解析超时，请稍后重试');
+        throw error;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 async function startPlayback(directUrl) {
     if (!directUrl) return;
     const source = new URLSearchParams(window.location.search).get('source') || '';
@@ -644,10 +680,24 @@ async function startPlayback(directUrl) {
     }
     const requestId = ++playbackStartRequest;
     zuidMirrorFallbackAttemptedForUrl = '';
-    const compatibleUrl = buildZuidMirrorUrl(directUrl) || buildWujinMirrorUrl(directUrl) || directUrl;
+    let playableUrl = directUrl;
+    if (source === 'xiaomaomi') {
+        showPlaybackLoading('正在解析小猫咪视频线路...');
+        try {
+            playableUrl = await resolveXiaomaomiPlaybackUrl(directUrl);
+        } catch (error) {
+            if (requestId === playbackStartRequest) {
+                showError(error && error.message || '小猫咪视频解析失败，请稍后重试');
+            }
+            return;
+        }
+        if (requestId !== playbackStartRequest) return;
+    }
 
-    if (!shouldStartThroughProxy(directUrl)) {
-        initPlayer(compatibleUrl, { directUrl });
+    const compatibleUrl = buildZuidMirrorUrl(playableUrl) || buildWujinMirrorUrl(playableUrl) || playableUrl;
+
+    if (!shouldStartThroughProxy(playableUrl)) {
+        initPlayer(compatibleUrl, { directUrl: playableUrl });
         return;
     }
 
@@ -656,10 +706,10 @@ async function startPlayback(directUrl) {
         const proxyUrl = await authenticatedProxyUrl(compatibleUrl);
         if (requestId !== playbackStartRequest) return;
         if (!/[?&]auth=/.test(proxyUrl)) throw new Error('代理鉴权信息不可用');
-        proxyFallbackAttemptedForUrl = directUrl;
-        initPlayer(proxyUrl, { directUrl, isProxy: true });
+        proxyFallbackAttemptedForUrl = playableUrl;
+        initPlayer(proxyUrl, { directUrl: playableUrl, isProxy: true });
     } catch (error) {
-        if (requestId === playbackStartRequest) initPlayer(compatibleUrl, { directUrl });
+        if (requestId === playbackStartRequest) initPlayer(compatibleUrl, { directUrl: playableUrl });
     }
 }
 
@@ -1133,20 +1183,49 @@ function initPlayer(videoUrl, playbackOptions = {}) {
     }, 10000);
 }
 
+function stripXiaomaomiPngPreamble(data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    if (bytes.length < 20 || !pngSignature.every((value, index) => bytes[index] === value)) {
+        return data;
+    }
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = pngSignature.length;
+    while (offset + 12 <= bytes.length) {
+        const chunkLength = view.getUint32(offset, false);
+        const chunkEnd = offset + 12 + chunkLength;
+        if (chunkEnd > bytes.length) return data;
+        const chunkType = String.fromCharCode(
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+        if (chunkType === 'IEND') {
+            const mediaBytes = bytes.slice(chunkEnd);
+            return mediaBytes.length > 0 ? mediaBytes.buffer : data;
+        }
+        offset = chunkEnd;
+    }
+    return data;
+}
+
 // 自定义M3U8 Loader用于过滤广告
 class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
     constructor(config) {
         super(config);
         const load = this.load.bind(this);
         this.load = function (context, config, callbacks) {
+            const isXiaomaomiRequest = new URLSearchParams(window.location.search).get('source') === 'xiaomaomi';
             // 拦截manifest和level请求
-            if (context.type === 'manifest' || context.type === 'level') {
+            if (context.type === 'manifest' || context.type === 'level' || isXiaomaomiRequest) {
                 const onSuccess = callbacks.onSuccess;
                 callbacks.onSuccess = function (response, stats, context) {
                     // 如果是m3u8文件，处理内容以移除广告分段
-                    if (response.data && typeof response.data === 'string') {
+                    if ((context.type === 'manifest' || context.type === 'level')
+                        && response.data && typeof response.data === 'string') {
                         // 过滤掉广告段 - 实现更精确的广告过滤逻辑
                         response.data = filterAdsFromM3U8(response.data, true);
+                    }
+                    if (isXiaomaomiRequest && response.data && typeof response.data !== 'string') {
+                        response.data = stripXiaomaomiPngPreamble(response.data);
                     }
                     return onSuccess(response, stats, context);
                 };

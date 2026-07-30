@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import { resolveXiaomaomiSource, XiaomaomiResolveError } from './functions/_shared/xiaomaomi.js';
 
 dotenv.config();
 
@@ -151,6 +152,32 @@ function validateProxyAuth(req) {
   
   return true;
 }
+
+const xiaomaomiResolveCache = new Map();
+
+app.post('/api/xiaomaomi-resolve', express.json({ limit: '4kb' }), async (req, res) => {
+  if (!validateProxyAuth(req)) {
+    return res.status(401).json({ code: 401, msg: '解析请求鉴权失败' });
+  }
+
+  const sourceUrl = req.body && req.body.url;
+  const cached = xiaomaomiResolveCache.get(sourceUrl);
+  if (cached && cached.expiresAt > Date.now()) {
+    return res.json({ code: 200, ...cached.media });
+  }
+
+  try {
+    const media = await resolveXiaomaomiSource(sourceUrl);
+    xiaomaomiResolveCache.set(sourceUrl, {
+      media,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    });
+    return res.json({ code: 200, ...media });
+  } catch (error) {
+    const status = error instanceof XiaomaomiResolveError ? error.status : 502;
+    return res.status(status).json({ code: status, msg: error.message || '小猫咪解析失败' });
+  }
+});
 
 app.get('/proxy/:encodedUrl', async (req, res) => {
   try {
