@@ -126,10 +126,17 @@ function resolveUrl(baseUrl, relativeUrl) {
 }
 
 // ** 已修正：确保生成 /proxy/ 前缀的链接 **
-function rewriteUrlToProxy(targetUrl) {
+function rewriteUrlToProxy(targetUrl, proxyAuthQuery = '') {
     if (!targetUrl || typeof targetUrl !== 'string') return '';
     // 返回与 vercel.json 的 "source" 和前端 PROXY_URL 一致的路径
-    return `/proxy/${encodeURIComponent(targetUrl)}`;
+    return `/proxy/${encodeURIComponent(targetUrl)}${proxyAuthQuery}`;
+}
+
+function getProxyAuthQuery(req) {
+    const params = new URLSearchParams();
+    if (req.query.auth) params.set('auth', req.query.auth);
+    const query = params.toString();
+    return query ? `?${query}` : '';
 }
 
 function getRandomUserAgent() {
@@ -186,23 +193,23 @@ function isM3u8Content(content, contentType) {
     return content && typeof content === 'string' && content.trim().startsWith('#EXTM3U');
 }
 
-function processKeyLine(line, baseUrl) {
+function processKeyLine(line, baseUrl, proxyAuthQuery) {
     return line.replace(/URI="([^"]+)"/, (match, uri) => {
         const absoluteUri = resolveUrl(baseUrl, uri);
         logDebug(`处理 KEY URI: 原始='${uri}', 绝对='${absoluteUri}'`);
-        return `URI="${rewriteUrlToProxy(absoluteUri)}"`;
+        return `URI="${rewriteUrlToProxy(absoluteUri, proxyAuthQuery)}"`;
     });
 }
 
-function processMapLine(line, baseUrl) {
+function processMapLine(line, baseUrl, proxyAuthQuery) {
      return line.replace(/URI="([^"]+)"/, (match, uri) => {
         const absoluteUri = resolveUrl(baseUrl, uri);
         logDebug(`处理 MAP URI: 原始='${uri}', 绝对='${absoluteUri}'`);
-        return `URI="${rewriteUrlToProxy(absoluteUri)}"`;
+        return `URI="${rewriteUrlToProxy(absoluteUri, proxyAuthQuery)}"`;
      });
  }
 
-function processMediaPlaylist(url, content) {
+function processMediaPlaylist(url, content, proxyAuthQuery) {
     const baseUrl = getBaseUrl(url);
     if (!baseUrl) {
         logDebug(`无法确定媒体列表的 Base URL: ${url}，相对路径可能无法处理。`);
@@ -215,14 +222,14 @@ function processMediaPlaylist(url, content) {
         if (!line && i === lines.length - 1) { output.push(line); continue; }
         if (!line) continue; // 跳过中间空行
         // 广告过滤已禁用
-        if (line.startsWith('#EXT-X-KEY')) { output.push(processKeyLine(line, baseUrl)); continue; }
-        if (line.startsWith('#EXT-X-MAP')) { output.push(processMapLine(line, baseUrl)); continue; }
+        if (line.startsWith('#EXT-X-KEY')) { output.push(processKeyLine(line, baseUrl, proxyAuthQuery)); continue; }
+        if (line.startsWith('#EXT-X-MAP')) { output.push(processMapLine(line, baseUrl, proxyAuthQuery)); continue; }
         if (line.startsWith('#EXTINF')) { output.push(line); continue; }
         // 处理 URL 行
         if (!line.startsWith('#')) {
             const absoluteUrl = resolveUrl(baseUrl, line);
             logDebug(`重写媒体片段: 原始='${line}', 解析后='${absoluteUrl}'`);
-            output.push(rewriteUrlToProxy(absoluteUrl)); continue;
+            output.push(rewriteUrlToProxy(absoluteUrl, proxyAuthQuery)); continue;
         }
         // 保留其他 M3U8 标签
         output.push(line);
@@ -230,17 +237,17 @@ function processMediaPlaylist(url, content) {
     return output.join('\n');
 }
 
-async function processM3u8Content(targetUrl, content, recursionDepth = 0) {
+async function processM3u8Content(targetUrl, content, proxyAuthQuery, recursionDepth = 0) {
     // 判断是主列表还是媒体列表
     if (content.includes('#EXT-X-STREAM-INF') || content.includes('#EXT-X-MEDIA:')) {
         logDebug(`检测到主播放列表: ${targetUrl} (深度: ${recursionDepth})`);
-        return await processMasterPlaylist(targetUrl, content, recursionDepth);
+        return await processMasterPlaylist(targetUrl, content, proxyAuthQuery, recursionDepth);
     }
     logDebug(`检测到媒体播放列表: ${targetUrl} (深度: ${recursionDepth})`);
-    return processMediaPlaylist(targetUrl, content);
+    return processMediaPlaylist(targetUrl, content, proxyAuthQuery);
 }
 
-async function processMasterPlaylist(url, content, recursionDepth) {
+async function processMasterPlaylist(url, content, proxyAuthQuery, recursionDepth) {
     // 检查递归深度
     if (recursionDepth > MAX_RECURSION) {
         throw new Error(`处理主播放列表时，递归深度超过最大限制 (${MAX_RECURSION}): ${url}`);
@@ -283,7 +290,7 @@ async function processMasterPlaylist(url, content, recursionDepth) {
     // 如果仍然没有找到子列表 URL
     if (!bestVariantUrl) {
         logDebug(`在主播放列表 ${url} 中未找到有效的子列表 URI，将其作为媒体列表处理。`);
-        return processMediaPlaylist(url, content);
+        return processMediaPlaylist(url, content, proxyAuthQuery);
     }
 
     logDebug(`选择的子播放列表 (带宽: ${highestBandwidth}): ${bestVariantUrl}`);
@@ -293,11 +300,11 @@ async function processMasterPlaylist(url, content, recursionDepth) {
     // 检查获取的内容是否是 M3U8
     if (!isM3u8Content(variantContent, variantContentType)) {
         logDebug(`获取的子播放列表 ${bestVariantUrl} 不是 M3U8 (类型: ${variantContentType})，将其作为媒体列表处理。`);
-        return processMediaPlaylist(bestVariantUrl, variantContent);
+        return processMediaPlaylist(bestVariantUrl, variantContent, proxyAuthQuery);
     }
 
     // 递归处理获取到的子 M3U8 内容
-    return await processM3u8Content(bestVariantUrl, variantContent, recursionDepth + 1);
+    return await processM3u8Content(bestVariantUrl, variantContent, proxyAuthQuery, recursionDepth + 1);
 }
 
 /**
@@ -418,7 +425,7 @@ export default async function handler(req, res) {
         // --- 如果是 M3U8，处理并返回 ---
         if (isM3u8Content(content, contentType)) {
             console.info(`正在处理 M3U8 内容: ${targetUrl}`);
-            const processedM3u8 = await processM3u8Content(targetUrl, content);
+            const processedM3u8 = await processM3u8Content(targetUrl, content, getProxyAuthQuery(req));
 
             console.info(`成功处理 M3U8: ${targetUrl}`);
             // 发送处理后的 M3U8 响应

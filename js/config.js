@@ -43,6 +43,10 @@ const API_SITES = {
         api: 'https://api.ffzyapi.com/api.php/provide/vod',
         name: '非凡影视'
     },
+    zy360: {
+        api: 'https://360zyzz.com/api.php/provide/vod',
+        name: '360资源'
+    },
     xiaomaomi: {
         api: 'https://zy.xiaomaomi.cc/api.php/provide/vod',
         name: '小猫咪资源',

@@ -79,10 +79,18 @@ function resolveUrl(baseUrl, relativeUrl) {
 }
 
 // ** MODIFIED for Netlify redirect **
-function rewriteUrlToProxy(targetUrl) {
+function rewriteUrlToProxy(targetUrl, proxyAuthQuery = '') {
     if (!targetUrl || typeof targetUrl !== 'string') return '';
     // Use the path defined in netlify.toml 'from' field
-    return `/proxy/${encodeURIComponent(targetUrl)}`;
+    return `/proxy/${encodeURIComponent(targetUrl)}${proxyAuthQuery}`;
+}
+
+function getProxyAuthQuery(event) {
+    const params = new URLSearchParams();
+    const { auth } = event.queryStringParameters || {};
+    if (auth) params.set('auth', auth);
+    const query = params.toString();
+    return query ? `?${query}` : '';
 }
 
 function getRandomUserAgent() { return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]; }
@@ -155,34 +163,34 @@ function isM3u8Content(content, contentType) {
     return content && typeof content === 'string' && content.trim().startsWith('#EXTM3U');
 }
 
-function processKeyLine(line, baseUrl) { return line.replace(/URI="([^"]+)"/, (match, uri) => { const absoluteUri = resolveUrl(baseUrl, uri); logDebug(`Processing KEY URI: Original='${uri}', Absolute='${absoluteUri}'`); return `URI="${rewriteUrlToProxy(absoluteUri)}"`; }); }
-function processMapLine(line, baseUrl) { return line.replace(/URI="([^"]+)"/, (match, uri) => { const absoluteUri = resolveUrl(baseUrl, uri); logDebug(`Processing MAP URI: Original='${uri}', Absolute='${absoluteUri}'`); return `URI="${rewriteUrlToProxy(absoluteUri)}"`; }); }
-function processMediaPlaylist(url, content) {
+function processKeyLine(line, baseUrl, proxyAuthQuery) { return line.replace(/URI="([^"]+)"/, (match, uri) => { const absoluteUri = resolveUrl(baseUrl, uri); logDebug(`Processing KEY URI: Original='${uri}', Absolute='${absoluteUri}'`); return `URI="${rewriteUrlToProxy(absoluteUri, proxyAuthQuery)}"`; }); }
+function processMapLine(line, baseUrl, proxyAuthQuery) { return line.replace(/URI="([^"]+)"/, (match, uri) => { const absoluteUri = resolveUrl(baseUrl, uri); logDebug(`Processing MAP URI: Original='${uri}', Absolute='${absoluteUri}'`); return `URI="${rewriteUrlToProxy(absoluteUri, proxyAuthQuery)}"`; }); }
+function processMediaPlaylist(url, content, proxyAuthQuery) {
     const baseUrl = getBaseUrl(url); if (!baseUrl) { logDebug(`Could not determine base URL for media playlist: ${url}. Cannot process relative paths.`); }
     const lines = content.split('\n'); const output = [];
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim(); if (!line && i === lines.length - 1) { output.push(line); continue; } if (!line) continue;
-        if (line.startsWith('#EXT-X-KEY')) { output.push(processKeyLine(line, baseUrl)); continue; }
-        if (line.startsWith('#EXT-X-MAP')) { output.push(processMapLine(line, baseUrl)); continue; }
+        if (line.startsWith('#EXT-X-KEY')) { output.push(processKeyLine(line, baseUrl, proxyAuthQuery)); continue; }
+        if (line.startsWith('#EXT-X-MAP')) { output.push(processMapLine(line, baseUrl, proxyAuthQuery)); continue; }
         if (line.startsWith('#EXTINF')) { output.push(line); continue; }
-        if (!line.startsWith('#')) { const absoluteUrl = resolveUrl(baseUrl, line); logDebug(`Rewriting media segment: Original='${line}', Resolved='${absoluteUrl}'`); output.push(rewriteUrlToProxy(absoluteUrl)); continue; }
+        if (!line.startsWith('#')) { const absoluteUrl = resolveUrl(baseUrl, line); logDebug(`Rewriting media segment: Original='${line}', Resolved='${absoluteUrl}'`); output.push(rewriteUrlToProxy(absoluteUrl, proxyAuthQuery)); continue; }
         output.push(line);
     } return output.join('\n');
 }
-async function processM3u8Content(targetUrl, content, recursionDepth = 0) {
-    if (content.includes('#EXT-X-STREAM-INF') || content.includes('#EXT-X-MEDIA:')) { logDebug(`Detected master playlist: ${targetUrl} (Depth: ${recursionDepth})`); return await processMasterPlaylist(targetUrl, content, recursionDepth); }
-    logDebug(`Detected media playlist: ${targetUrl} (Depth: ${recursionDepth})`); return processMediaPlaylist(targetUrl, content);
+async function processM3u8Content(targetUrl, content, proxyAuthQuery, recursionDepth = 0) {
+    if (content.includes('#EXT-X-STREAM-INF') || content.includes('#EXT-X-MEDIA:')) { logDebug(`Detected master playlist: ${targetUrl} (Depth: ${recursionDepth})`); return await processMasterPlaylist(targetUrl, content, proxyAuthQuery, recursionDepth); }
+    logDebug(`Detected media playlist: ${targetUrl} (Depth: ${recursionDepth})`); return processMediaPlaylist(targetUrl, content, proxyAuthQuery);
 }
-async function processMasterPlaylist(url, content, recursionDepth) {
+async function processMasterPlaylist(url, content, proxyAuthQuery, recursionDepth) {
     if (recursionDepth > MAX_RECURSION) { throw new Error(`Max recursion depth (${MAX_RECURSION}) exceeded for master playlist: ${url}`); }
     const baseUrl = getBaseUrl(url); const lines = content.split('\n'); let highestBandwidth = -1; let bestVariantUrl = '';
     for (let i = 0; i < lines.length; i++) { if (lines[i].startsWith('#EXT-X-STREAM-INF')) { const bandwidthMatch = lines[i].match(/BANDWIDTH=(\d+)/); const currentBandwidth = bandwidthMatch ? parseInt(bandwidthMatch[1], 10) : 0; let variantUriLine = ''; for (let j = i + 1; j < lines.length; j++) { const line = lines[j].trim(); if (line && !line.startsWith('#')) { variantUriLine = line; i = j; break; } } if (variantUriLine && currentBandwidth >= highestBandwidth) { highestBandwidth = currentBandwidth; bestVariantUrl = resolveUrl(baseUrl, variantUriLine); } } }
     if (!bestVariantUrl) { logDebug(`No BANDWIDTH found, trying first URI in: ${url}`); for (let i = 0; i < lines.length; i++) { const line = lines[i].trim(); if (line && !line.startsWith('#') && line.match(/\.m3u8($|\?.*)/i)) { bestVariantUrl = resolveUrl(baseUrl, line); logDebug(`Fallback: Found first sub-playlist URI: ${bestVariantUrl}`); break; } } }
-    if (!bestVariantUrl) { logDebug(`No valid sub-playlist URI found in master: ${url}. Processing as media playlist.`); return processMediaPlaylist(url, content); }
+    if (!bestVariantUrl) { logDebug(`No valid sub-playlist URI found in master: ${url}. Processing as media playlist.`); return processMediaPlaylist(url, content, proxyAuthQuery); }
     logDebug(`Selected sub-playlist (Bandwidth: ${highestBandwidth}): ${bestVariantUrl}`);
     const { content: variantContent, contentType: variantContentType } = await fetchContentWithType(bestVariantUrl, {});
-    if (!isM3u8Content(variantContent, variantContentType)) { logDebug(`Fetched sub-playlist ${bestVariantUrl} is not M3U8 (Type: ${variantContentType}). Treating as media playlist.`); return processMediaPlaylist(bestVariantUrl, variantContent); }
-    return await processM3u8Content(bestVariantUrl, variantContent, recursionDepth + 1);
+    if (!isM3u8Content(variantContent, variantContentType)) { logDebug(`Fetched sub-playlist ${bestVariantUrl} is not M3U8 (Type: ${variantContentType}). Treating as media playlist.`); return processMediaPlaylist(bestVariantUrl, variantContent, proxyAuthQuery); }
+    return await processM3u8Content(bestVariantUrl, variantContent, proxyAuthQuery, recursionDepth + 1);
 }
 
 
@@ -276,7 +284,7 @@ export const handler = async (event, context) => {
         // --- Process if M3U8 ---
         if (isM3u8Content(content, contentType)) {
             logDebug(`Processing M3U8 content: ${targetUrl}`);
-            const processedM3u8 = await processM3u8Content(targetUrl, content);
+            const processedM3u8 = await processM3u8Content(targetUrl, content, getProxyAuthQuery(event));
 
             logDebug(`Successfully processed M3U8 for ${targetUrl}`);
             return {

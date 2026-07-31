@@ -95,7 +95,7 @@ let proxyFallbackAttemptedForUrl = '';
 let zuidMirrorFallbackAttemptedForUrl = '';
 let playbackGeneration = 0;
 let playbackStartRequest = 0;
-const DISABLED_PLAYBACK_SOURCES = new Set(['zy360']);
+const DISABLED_PLAYBACK_SOURCES = new Set();
 const xiaomaomiPlaybackCache = new Map();
 Artplayer.FULLSCREEN_WEB_IN_BODY = true;
 
@@ -621,6 +621,7 @@ function shouldStartThroughProxy(directUrl) {
     const source = new URLSearchParams(window.location.search).get('source') || '';
     if (buildZuidMirrorUrl(directUrl)) return true;
     if (buildWujinMirrorUrl(directUrl)) return true;
+    if (source === 'zy360') return true;
     if (source === 'zuid') return false;
     if (source === 'ruyi') return true;
 

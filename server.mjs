@@ -179,6 +179,74 @@ app.post('/api/xiaomaomi-resolve', express.json({ limit: '4kb' }), async (req, r
   }
 });
 
+function isM3u8Response(targetUrl, headers) {
+  const contentType = String(headers && headers['content-type'] || '').toLowerCase();
+  if (contentType.includes('mpegurl') || contentType.includes('m3u8')) return true;
+
+  try {
+    return /\.m3u8?$/i.test(new URL(targetUrl).pathname);
+  } catch {
+    return /\.m3u8?(?:[?#]|$)/i.test(targetUrl || '');
+  }
+}
+
+function nestedProxyUrl(targetUrl, req) {
+  const query = new URLSearchParams();
+  const rawValue = req.query && req.query.auth;
+  const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+  if (typeof value === 'string' && value) query.set('auth', value);
+
+  const proxyPath = `/proxy/${encodeURIComponent(targetUrl)}`;
+  const queryString = query.toString();
+  return queryString ? `${proxyPath}?${queryString}` : proxyPath;
+}
+
+function resolvePlaylistUri(playlistUrl, uri) {
+  if (!uri || (/^[a-z][a-z\d+.-]*:/i.test(uri) && !/^https?:/i.test(uri))) {
+    return '';
+  }
+
+  try {
+    return new URL(uri, playlistUrl).href;
+  } catch {
+    return '';
+  }
+}
+
+function rewriteM3u8(content, playlistUrl, req) {
+  const rewriteUri = (uri) => {
+    const absoluteUrl = resolvePlaylistUri(playlistUrl, uri);
+    return absoluteUrl ? nestedProxyUrl(absoluteUrl, req) : uri;
+  };
+
+  return content.split(/\r?\n/).map((originalLine) => {
+    const line = originalLine.trim();
+    if (!line) return originalLine;
+
+    if (!line.startsWith('#')) return rewriteUri(line);
+
+    return originalLine.replace(
+      /(\bURI\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^,\s]+))/gi,
+      (match, prefix, doubleQuoted, singleQuoted, unquoted) => {
+        const uri = doubleQuoted ?? singleQuoted ?? unquoted;
+        const rewritten = rewriteUri(uri);
+        if (rewritten === uri) return match;
+        if (doubleQuoted !== undefined) return `${prefix}"${rewritten}"`;
+        if (singleQuoted !== undefined) return `${prefix}'${rewritten}'`;
+        return `${prefix}${rewritten}`;
+      }
+    );
+  }).join('\n');
+}
+
+async function readTextStream(stream) {
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 app.get('/proxy/:encodedUrl', async (req, res) => {
   try {
     // 验证鉴权
@@ -211,7 +279,11 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
           responseType: 'stream',
           timeout: config.timeout,
           headers: {
-            'User-Agent': config.userAgent
+            'User-Agent': config.userAgent,
+            'Accept': req.headers.accept || '*/*',
+            'Referer': `${new URL(targetUrl).origin}/`,
+            ...(req.headers.range ? { Range: req.headers.range } : {}),
+            ...(req.headers['if-range'] ? { 'If-Range': req.headers['if-range'] } : {})
           }
         });
       } catch (error) {
@@ -233,10 +305,21 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
       'content-security-policy,cookie,set-cookie,x-frame-options,access-control-allow-origin'
     ).split(',');
     
-    sensitiveHeaders.forEach(header => delete headers[header]);
-    res.set(headers);
+    sensitiveHeaders.forEach(header => delete headers[header.trim().toLowerCase()]);
 
-    // 管道传输响应流
+    if (isM3u8Response(targetUrl, response.headers)) {
+      const playlistUrl = response.request?.res?.responseUrl || targetUrl;
+      const content = await readTextStream(response.data);
+      delete headers['content-length'];
+      delete headers['content-encoding'];
+      delete headers['transfer-encoding'];
+      headers['content-type'] = 'application/vnd.apple.mpegurl; charset=utf-8';
+      headers['cache-control'] = 'no-store';
+      res.status(response.status).set(headers).send(rewriteM3u8(content, playlistUrl, req));
+      return;
+    }
+
+    res.status(response.status).set(headers);
     response.data.pipe(res);
   } catch (error) {
     console.error('代理请求错误:', error.message);
